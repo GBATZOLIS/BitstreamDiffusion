@@ -1,0 +1,70 @@
+# Byte-compiled / optimized / C extensions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# PyTorch / Triton / Inductor caches
+torch_compile_debug/
+.torch_compile_cache/
+.triton_cache/
+
+# Project-specific large/transient data
+# datasets/  — symlinks to dataset caches; rebuild via scripts/lm1b/ and scripts/owt/
+datasets/
+# runs/      — training outputs, checkpoints, eval results
+runs/
+# logs/      — SLURM job logs and stdout/stderr captures
+logs/
+# hf_cache  — HuggingFace model cache symlink (gpt2-large, tokenizers, etc.)
+hf_cache
+hf_cache/
+# wandb/     — Weights & Biases run directory
+wandb/
+generated_samples/
+generated_output.png
+
+# Model checkpoints (anywhere they accidentally land outside runs/)
+*.pth
+*.pt
+*.ckpt
+
+# Crash dumps
+core
+core.*

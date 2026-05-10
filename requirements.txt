@@ -1,0 +1,37 @@
+# Core
+numpy>=1.24
+scipy>=1.11
+tqdm>=4.66
+filelock>=3.13
+ml_collections>=0.1.1
+omegaconf>=2.3
+einops>=0.7
+
+# HuggingFace stack — used for tokenizers, OWT data loading, and external GPT-2 PPL
+transformers>=4.40
+tokenizers>=0.19
+datasets>=2.18
+
+# Logging / TensorBoard
+tensorboard>=2.15
+
+# Evaluation: MAUVE metric
+mauve-text>=0.4.0
+matplotlib>=3.8
+
+# Image FID dependency (kept for completeness; unused by the text configs)
+pytorch-fid>=0.3.0
+
+# Released-artifact download from Google Drive (used by the Quick Start in the README)
+gdown>=5.1
+
+# OWT codec / semantic-map preparation (optional; only needed if rebuilding from scratch)
+gensim>=4.3
+# tensorflow-datasets>=4.9   # uncomment if using --backend tfds for LM1B download
+
+# Optional: faster attention kernel
+# (install separately so users on incompatible hardware can skip it)
+# flash-attn>=2.5
+
+# Optional: experiment tracking
+# wandb>=0.16
