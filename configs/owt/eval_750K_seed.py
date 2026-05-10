@@ -149,12 +149,13 @@ def get_config():
             spec.gamma_target = float(gamma_target)
         cfg.evaluation.sampling_sweep.specs.append(spec)
 
-    # TEMP: trimmed to the single Table 1 headline spec (gamma=0.13) for fast smoke feedback.
-    # Uncomment the gamma=0.175 and gamma=0.180 specs below to also reproduce the high-entropy
-    # operating point reported in §4.2 / sample Table 14 of the paper.
-    add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.13, s_noise=1.003, qlo=0.0, qhi=1.0)
-    # add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.175, s_noise=1.003, qlo=0.0, qhi=1.0)
-    # add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.180, s_noise=1.003, qlo=0.0, qhi=1.0)
+    # gamma=0.13  -> Table 1 OWT Stochastic headline (GenPPL=27.06, entropy=5.26).
+    # gamma=0.18  -> §4.2 / sample Table 14 high-entropy operating point
+    #                (GenPPL=34.35, entropy=5.32).
+    # gamma=0.175 -> nearby frontier point.
+    add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.13,  s_noise=1.003, qlo=0.0, qhi=1.0)
+    add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.175, s_noise=1.003, qlo=0.0, qhi=1.0)
+    add_spec(target_nfe=256, ati_eta=0.0, stochastic_enabled=True, gamma_target=0.180, s_noise=1.003, qlo=0.0, qhi=1.0)
 
     cfg.evaluation.external_ppl = config_dict.ConfigDict()
     cfg.evaluation.external_ppl.enabled = True
