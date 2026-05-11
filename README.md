@@ -70,18 +70,38 @@ Tested with Python 3.10 and CUDA 12.x. We recommend a fresh conda environment.
 conda create -n bitstream python=3.10 -y
 conda activate bitstream
 
+# IMPORTANT: use `python -m pip ...` rather than bare `pip ...`. On many
+# clusters the `pip` shim resolves to the system Python instead of the
+# conda one, silently installing everything into the wrong interpreter.
+# Confirm with: `which python && python -m pip --version`.
+
 # PyTorch — pick the build matching your CUDA toolkit
 # (replace cu121 with your CUDA version; see https://pytorch.org/get-started)
-pip install torch==2.4.* --index-url https://download.pytorch.org/whl/cu121
+python -m pip install torch==2.4.* --index-url https://download.pytorch.org/whl/cu121
 
 # Project dependencies
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
-# Optional: FlashAttention 2 for ~30% faster training/sampling
-pip install flash-attn --no-build-isolation
+# Optional: FlashAttention 2 for ~30% faster training/sampling.
+# Skip this if your hardware / toolchain makes the build painful — the
+# code transparently falls back to SDPA (see note below).
+python -m pip install flash-attn --no-build-isolation
 ```
 
-`flash_attn` is optional; the code falls back to `torch.nn.functional.scaled_dot_product_attention` automatically if it is unavailable.
+`flash_attn` is genuinely optional: the import is guarded and the attention
+layer transparently falls back to `torch.nn.functional.scaled_dot_product_attention`
+([models/backbones/official_sedd.py](models/backbones/official_sedd.py)) if
+the package is not installed.
+
+The image-FID dependency `pytorch-fid` is **not** installed by default — its
+pinned `torchvision` requirement conflicts with the `torch==2.4.*` build we
+recommend, and it is only used for an unrelated image-FID evaluator that the
+text experiments in this paper never invoke. If you need it, install it
+separately:
+
+```bash
+python -m pip install pytorch-fid
+```
 
 ---
 
@@ -126,6 +146,57 @@ gdown 1TAOPKgtDHbOQUGGphncCXGazMeRq1DkZ \
 ```
 
 `gdown` handles Google Drive's "large file" interstitial automatically and resumes interrupted transfers. The LM1B checkpoint goes directly into the path the LM1B eval config expects; same for OWT.
+
+#### Entropic schedule artefacts
+
+The entropy-rate noise schedule used in the paper (Eq. 13, Figure 4) is
+**dataset-specific** — the LM1B and OWT models were trained with different
+entropy profiles, and the sampler needs the matching profile at evaluation
+time. Each profile is stored as four small `.pt` files (~7 KB total per
+dataset):
+
+```
+entropy_pdf.pt      # bin probabilities of the entropy-rate distribution
+entropy_cdf.pt      # cumulative integral, used by the entropic σ-schedule
+entropy_sigmas.pt   # bin midpoints in σ-space
+entropy_edges.pt    # bin edges in σ-space
+```
+
+These files **ship with the repository** under
+[`assets/entropy_tables/lm1b/`](assets/entropy_tables/lm1b/) and
+[`assets/entropy_tables/owt/`](assets/entropy_tables/owt/), and both eval
+configs reference these paths via `cfg.evaluation.entropy_run_dir`. Nothing
+to download for the quick-start path — it just works.
+
+> ⚠️  If the entropy tables for the requested dataset are missing, the
+> sampler now **hard-errors** rather than silently falling back to a Karras
+> schedule. The Karras fallback typically degrades GenPPL by 30–40 points
+> on LM1B and is the difference between the headline numbers and clearly
+> wrong ones (see Figure 4 in the paper appendix for the deterministic and
+> stochastic comparisons).
+
+If you ever need to re-download them (e.g., because you cloned without
+LFS or accidentally removed the directory), the same files are also
+mirrored on Google Drive:
+
+| Dataset | Files | Destination |
+|---|---|---|
+| LM1B | `entropy_{pdf,cdf,sigmas,edges}.pt` | `assets/entropy_tables/lm1b/` |
+| OWT  | `entropy_{pdf,cdf,sigmas,edges}.pt` | `assets/entropy_tables/owt/`  |
+
+```bash
+# (Drive folder IDs are filled in once the bundle is uploaded — for now,
+# the in-repo copies at assets/entropy_tables/ are the source of truth.)
+# gdown --folder <FOLDER_ID_LM1B> -O assets/entropy_tables/lm1b/
+# gdown --folder <FOLDER_ID_OWT>  -O assets/entropy_tables/owt/
+```
+
+If you train your own model with `train.py`, the trainer writes its own
+`entropy_{pdf,cdf,sigmas,edges}.pt` into the training `run_dir`. To
+evaluate that model rather than the released checkpoint, edit your eval
+config and either remove the `cfg.evaluation.entropy_run_dir` line
+(default: derived from `cfg.evaluation.checkpoint_path`) or set it to
+your training run directory.
 
 ### Step 2 — Prepare datasets
 

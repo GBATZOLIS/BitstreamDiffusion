@@ -7,10 +7,15 @@ ml_collections>=0.1.1
 omegaconf>=2.3
 einops>=0.7
 
-# HuggingFace stack — used for tokenizers, OWT data loading, and external GPT-2 PPL
-transformers>=4.40
+# HuggingFace stack — used for tokenizers, OWT data loading, and external GPT-2 PPL.
+# transformers is pinned to a tested window: newer 4.50+ releases break older
+# torch builds with `ValueError: infer_schema(func): ... unsupported type torch.Tensor`,
+# and `accelerate` is required by the `low_cpu_mem_usage=True` / `device_map` paths
+# the external-PPL evaluator uses when loading GPT-2 large.
+transformers>=4.40,<4.50
 tokenizers>=0.19
 datasets>=2.18
+accelerate>=0.30
 
 # Logging / TensorBoard
 tensorboard>=2.15
@@ -19,8 +24,13 @@ tensorboard>=2.15
 mauve-text>=0.4.0
 matplotlib>=3.8
 
-# Image FID dependency (kept for completeness; unused by the text configs)
-pytorch-fid>=0.3.0
+# Image FID dependency (only needed for the image FID evaluator in
+# evaluation/fid.py — unused by the LM1B / OWT text configs in this paper).
+# Skipped by default because its pinned torchvision constraint conflicts with
+# the torch==2.4.* build we recommend below. Install separately if you need
+# image FID:
+#   python -m pip install pytorch-fid
+# pytorch-fid>=0.3.0
 
 # Released-artifact download from Google Drive (used by the Quick Start in the README)
 gdown>=5.1

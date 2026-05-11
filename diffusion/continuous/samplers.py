@@ -907,8 +907,16 @@ class SigmaSchedule:
         if schedule_name == "entropic":
             _, cdf, sigmas_base = self._load_entropy_tables(entropy_run_dir=entropy_run_dir)
             if cdf is None or sigmas_base is None:
-                print("[WARN] entropic schedule requested but entropy tables missing; falling back to Karras.")
-                return self._karras_schedule(N, sigma_min=sigma_min, sigma_max=sigma_max)
+                resolved_dir = entropy_run_dir if entropy_run_dir is not None else self._default_entropy_run_dir()
+                raise FileNotFoundError(
+                    "Entropic schedule was requested but the entropy tables "
+                    "(entropy_pdf.pt, entropy_cdf.pt, entropy_sigmas.pt) are missing.\n"
+                    f"Looked in: {resolved_dir}\n"
+                    "The released LM1B and OWT eval configs point at "
+                    "assets/entropy_tables/<dataset>/, which ships with the repo. "
+                    "If you moved or deleted those files, see the README section "
+                    "'Entropic schedule artefacts' for download/restore instructions."
+                )
 
             cdf = cdf.to(self.device).clone().float()
             cdf[-1] = 1.0

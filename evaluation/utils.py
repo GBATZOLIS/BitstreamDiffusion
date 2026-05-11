@@ -227,7 +227,10 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     print(f"Loading checkpoint: {ckpt_path}")
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    # Our checkpoints contain non-tensor objects (EMA state, optimizer, etc.) so
+    # weights_only=True would refuse to load them. Released artefacts are
+    # produced by this repo only — we explicitly opt in to full unpickling.
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
     model_to_load = unwrap_all(model)
 

@@ -96,6 +96,11 @@ def get_config():
     
     cfg.evaluation = config_dict.ConfigDict()
     cfg.evaluation.checkpoint_path = f"runs/{cfg.experiment}/checkpoints/{ckpt_name}"
+    # Entropy-rate schedule artefacts that pair with the released checkpoint.
+    # The dataset-specific entropy_pdf/cdf/sigmas/edges.pt files ship with the
+    # repo under assets/entropy_tables/lm1b/ — using Karras instead degrades
+    # GenPPL by ~40 points (see Figure 4 in the paper appendix).
+    cfg.evaluation.entropy_run_dir = "assets/entropy_tables/lm1b"
     # Restored to original output directory
     cfg.evaluation.out_dir = f"runs/{cfg.experiment}/evaluation_cleanup_smoketest"
     cfg.evaluation.samples_dir = f"{cfg.evaluation.out_dir}/samples"

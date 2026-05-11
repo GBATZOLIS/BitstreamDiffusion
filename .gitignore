@@ -64,6 +64,9 @@ generated_output.png
 *.pth
 *.pt
 *.ckpt
+# Exception: entropy-rate schedule artefacts that ship with the repo and are
+# loaded at evaluation time (assets/entropy_tables/<dataset>/entropy_*.pt).
+!assets/entropy_tables/**/*.pt
 
 # Crash dumps
 core

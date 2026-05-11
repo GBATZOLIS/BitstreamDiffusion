@@ -6,8 +6,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# FlashAttention (kept as in the original)
-from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
+# FlashAttention is optional. If unavailable we transparently fall back to
+# torch.nn.functional.scaled_dot_product_attention (SDPA), so the model
+# still runs on machines without a working flash-attn build.
+try:
+    from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
+    _HAS_FLASH_ATTN = True
+except ImportError:
+    flash_attn_varlen_qkvpacked_func = None
+    _HAS_FLASH_ATTN = False
 
 # Local fused helpers and rotary embeddings
 from . import sedd_helpers as helpers
@@ -107,22 +114,34 @@ class DDiTBlock(nn.Module):
         cos, sin = rotary_cos_sin
         qkv = helpers.apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
 
-        # FlashAttention expects packed varlen; we pack (B,S) as a single chunk
-        qkv = rearrange(qkv, "b s ... -> (b s) ...")
-        cu_seqlens = torch.arange(0, (B + 1) * S, step=S, dtype=torch.int32, device=qkv.device)
-
-        # Ensure FA dtype
-        if torch.is_autocast_enabled():
-            target = torch.get_autocast_gpu_dtype()
-            if qkv.dtype != target:
-                qkv = qkv.to(target)
-        if qkv.dtype not in (torch.float16, torch.bfloat16):
-            raise RuntimeError(
-                f"FlashAttention expects fp16/bf16, got {qkv.dtype}. Check autocast dtype selection."
+        if _HAS_FLASH_ATTN:
+            # FlashAttention expects packed varlen; we pack (B,S) as a single chunk
+            qkv_packed = rearrange(qkv, "b s ... -> (b s) ...")
+            cu_seqlens = torch.arange(
+                0, (B + 1) * S, step=S, dtype=torch.int32, device=qkv_packed.device
             )
 
-        x_attn = flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, S, 0.0, causal=False)
-        x_attn = rearrange(x_attn, "(b s) h d -> b s (h d)", b=B)
+            # Ensure FA dtype
+            if torch.is_autocast_enabled():
+                target = torch.get_autocast_gpu_dtype()
+                if qkv_packed.dtype != target:
+                    qkv_packed = qkv_packed.to(target)
+            if qkv_packed.dtype not in (torch.float16, torch.bfloat16):
+                raise RuntimeError(
+                    f"FlashAttention expects fp16/bf16, got {qkv_packed.dtype}. "
+                    "Check autocast dtype selection."
+                )
+
+            x_attn = flash_attn_varlen_qkvpacked_func(qkv_packed, cu_seqlens, S, 0.0, causal=False)
+            x_attn = rearrange(x_attn, "(b s) h d -> b s (h d)", b=B)
+        else:
+            # SDPA fallback: split [B, S, 3, H, D] into (q, k, v) of [B, H, S, D]
+            q, k, v = qkv.unbind(dim=2)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
+            x_attn = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+            x_attn = rearrange(x_attn, "b h s d -> b s (h d)").contiguous()
 
         x = bdas(self.attn_out(x_attn), None, gate_msa, x_skip, self.dropout)
 
