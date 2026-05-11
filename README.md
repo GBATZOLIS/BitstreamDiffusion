@@ -119,8 +119,16 @@ We release the trained checkpoints and the OWT second-stage code tokenizer on Go
 | OWT checkpoint (750K steps, EMA) | 2.0 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` | [download](https://drive.google.com/file/d/1XqhNN_vpvWTCbrxiSbxRDOcCUWMPkM81/view?usp=sharing) |
 | OWT 16-bit code tokenizer (`gpt2id_bpe16`) | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.json` | [download](https://drive.google.com/file/d/1XGHaGxW7D0nE8SeMG47n6d0GFix_QgZ0/view?usp=sharing) |
 | OWT tokenizer metadata | 1.3 KB | `datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.meta.json` | [download](https://drive.google.com/file/d/1TAOPKgtDHbOQUGGphncCXGazMeRq1DkZ/view?usp=sharing) |
+| LM1B entropy schedule — pdf | 1.7 KB | `assets/entropy_tables/lm1b/entropy_pdf.pt` | [download](https://drive.google.com/file/d/14CwyZbIUdbIzwKOsJ2HvXU72j0A32Kbp/view?usp=sharing) |
+| LM1B entropy schedule — cdf | 1.7 KB | `assets/entropy_tables/lm1b/entropy_cdf.pt` | [download](https://drive.google.com/file/d/1LAMW82ccHZgeErh2h9I0-YmcDxU4n7Ve/view?usp=sharing) |
+| LM1B entropy schedule — sigmas | 1.7 KB | `assets/entropy_tables/lm1b/entropy_sigmas.pt` | [download](https://drive.google.com/file/d/1tevq_HcwB67V_w7nKED3v0Jl2OLJYmIP/view?usp=sharing) |
+| LM1B entropy schedule — edges | 1.7 KB | `assets/entropy_tables/lm1b/entropy_edges.pt` | [download](https://drive.google.com/file/d/1v1617PJGAczFG5L0MBdBLln06otGGaLy/view?usp=sharing) |
+| OWT entropy schedule — pdf | 1.7 KB | `assets/entropy_tables/owt/entropy_pdf.pt` | [download](https://drive.google.com/file/d/1wUtZbxIrxBFs6atYME6xcMm5NgYfwFel/view?usp=sharing) |
+| OWT entropy schedule — cdf | 1.7 KB | `assets/entropy_tables/owt/entropy_cdf.pt` | [download](https://drive.google.com/file/d/1ktggtMf-waPCrgE1pt8I1sUeimcAZ23R/view?usp=sharing) |
+| OWT entropy schedule — sigmas | 1.7 KB | `assets/entropy_tables/owt/entropy_sigmas.pt` | [download](https://drive.google.com/file/d/1oWmarLOSWiBIrKK5d8Qt0XDhlCJGgBHD/view?usp=sharing) |
+| OWT entropy schedule — edges | 1.7 KB | `assets/entropy_tables/owt/entropy_edges.pt` | [download](https://drive.google.com/file/d/1eeLXfbtFy_eANVXhCH-21E28QDX2tw4-/view?usp=sharing) |
 
-The expected paths above are exactly the ones referenced by the training and evaluation configs — no path edits needed.
+The expected paths above are exactly the ones referenced by the training and evaluation configs — no path edits needed. **The entropy schedule artefacts also ship in this repository** under [`assets/entropy_tables/`](assets/entropy_tables/), so the Drive copies are a redundant mirror — only download them if you removed the in-repo bundle for some reason.
 
 #### One-shot download via `gdown`
 
@@ -143,17 +151,32 @@ gdown 1XGHaGxW7D0nE8SeMG47n6d0GFix_QgZ0 \
   -O datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.json
 gdown 1TAOPKgtDHbOQUGGphncCXGazMeRq1DkZ \
   -O datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.meta.json
+
+# (Optional) Re-fetch the entropy schedule tables — these already ship in the
+# repo under assets/entropy_tables/, so you only need this if you removed them.
+mkdir -p assets/entropy_tables/lm1b assets/entropy_tables/owt
+gdown 14CwyZbIUdbIzwKOsJ2HvXU72j0A32Kbp -O assets/entropy_tables/lm1b/entropy_pdf.pt
+gdown 1LAMW82ccHZgeErh2h9I0-YmcDxU4n7Ve -O assets/entropy_tables/lm1b/entropy_cdf.pt
+gdown 1tevq_HcwB67V_w7nKED3v0Jl2OLJYmIP -O assets/entropy_tables/lm1b/entropy_sigmas.pt
+gdown 1v1617PJGAczFG5L0MBdBLln06otGGaLy -O assets/entropy_tables/lm1b/entropy_edges.pt
+gdown 1wUtZbxIrxBFs6atYME6xcMm5NgYfwFel -O assets/entropy_tables/owt/entropy_pdf.pt
+gdown 1ktggtMf-waPCrgE1pt8I1sUeimcAZ23R -O assets/entropy_tables/owt/entropy_cdf.pt
+gdown 1oWmarLOSWiBIrKK5d8Qt0XDhlCJGgBHD -O assets/entropy_tables/owt/entropy_sigmas.pt
+gdown 1eeLXfbtFy_eANVXhCH-21E28QDX2tw4- -O assets/entropy_tables/owt/entropy_edges.pt
+
+# Verify the entropy artefacts match what the released checkpoints expect.
+# Should print "OK" for each of the 8 files; mismatches indicate corruption.
+( cd assets/entropy_tables && sha256sum -c SHA256SUMS )
 ```
 
 `gdown` handles Google Drive's "large file" interstitial automatically and resumes interrupted transfers. The LM1B checkpoint goes directly into the path the LM1B eval config expects; same for OWT.
 
-#### Entropic schedule artefacts
+#### A note on the entropy schedule artefacts
 
 The entropy-rate noise schedule used in the paper (Eq. 13, Figure 4) is
 **dataset-specific** — the LM1B and OWT models were trained with different
 entropy profiles, and the sampler needs the matching profile at evaluation
-time. Each profile is stored as four small `.pt` files (~7 KB total per
-dataset):
+time. Each profile is four small `.pt` files (~7 KB total per dataset):
 
 ```
 entropy_pdf.pt      # bin probabilities of the entropy-rate distribution
@@ -165,31 +188,14 @@ entropy_edges.pt    # bin edges in σ-space
 These files **ship with the repository** under
 [`assets/entropy_tables/lm1b/`](assets/entropy_tables/lm1b/) and
 [`assets/entropy_tables/owt/`](assets/entropy_tables/owt/), and both eval
-configs reference these paths via `cfg.evaluation.entropy_run_dir`. Nothing
-to download for the quick-start path — it just works.
+configs reference those paths via `cfg.evaluation.entropy_run_dir`. The
+Drive links above are a redundant mirror — there's normally nothing to
+download.
 
 > ⚠️  If the entropy tables for the requested dataset are missing, the
-> sampler now **hard-errors** rather than silently falling back to a Karras
+> sampler **hard-errors** rather than silently falling back to a Karras
 > schedule. The Karras fallback typically degrades GenPPL by 30–40 points
-> on LM1B and is the difference between the headline numbers and clearly
-> wrong ones (see Figure 4 in the paper appendix for the deterministic and
-> stochastic comparisons).
-
-If you ever need to re-download them (e.g., because you cloned without
-LFS or accidentally removed the directory), the same files are also
-mirrored on Google Drive:
-
-| Dataset | Files | Destination |
-|---|---|---|
-| LM1B | `entropy_{pdf,cdf,sigmas,edges}.pt` | `assets/entropy_tables/lm1b/` |
-| OWT  | `entropy_{pdf,cdf,sigmas,edges}.pt` | `assets/entropy_tables/owt/`  |
-
-```bash
-# (Drive folder IDs are filled in once the bundle is uploaded — for now,
-# the in-repo copies at assets/entropy_tables/ are the source of truth.)
-# gdown --folder <FOLDER_ID_LM1B> -O assets/entropy_tables/lm1b/
-# gdown --folder <FOLDER_ID_OWT>  -O assets/entropy_tables/owt/
-```
+> on LM1B (see Figure 4 in the paper appendix).
 
 If you train your own model with `train.py`, the trainer writes its own
 `entropy_{pdf,cdf,sigmas,edges}.pt` into the training `run_dir`. To
