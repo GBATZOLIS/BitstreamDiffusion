@@ -4,7 +4,7 @@ Official implementation of the paper:
 
 > **Towards Closing the Autoregressive Gap in Language Modeling via Entropy-Gated Continuous Bitstream Diffusion**
 > Georgios Batzolis, Mark Girolami, Luca Ambrogioni
-> *arXiv preprint, 2026.* — \[paper link TODO\]
+> *arXiv preprint, 2026.* — [arXiv:2605.07013](https://arxiv.org/abs/2605.07013)
 
 We model text as a continuous diffusion process over fixed-width binary bitstreams. Semantic tokens are encoded as analog bit sequences; a matched-filter residual parameterization isolates contextual learning from analytic independent-bit posteriors; and an entropy-rate-gated stochastic sampler concentrates Langevin-type corrections in information-active noise regions. The resulting 130M-parameter model reaches GenPPL = **59.76** at matched real-data entropy on LM1B and GenPPL = **27.06** at entropy 5.26 on OpenWebText, both at 256 NFEs.
 
