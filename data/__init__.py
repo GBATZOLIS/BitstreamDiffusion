@@ -65,8 +65,18 @@ def get_loader(
         ds = LM1BDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- Sudoku (task) ----------------
+    if name in {"sudoku", "Sudoku"}:
+        from .sudoku import SudokuDataset
+        return _make_direct_loader(SudokuDataset(config, split=split))
+
+    # ---------------- TinyGSM / GSM8K (task) ----------------
+    if name in {"tinygsm", "TinyGSM", "gsm8k", "GSM8K"}:
+        from .tinygsm import TinyGSMDataset
+        return _make_direct_loader(TinyGSMDataset(config, split=split))
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'sudoku', 'tinygsm'."
     )
 
 
@@ -89,6 +99,14 @@ def get_dataloaders(
         from .lm1b import get_dataloaders as _lm1b_get_dataloaders
         return _lm1b_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
+    if name in {"sudoku", "Sudoku"}:
+        from .sudoku import get_dataloaders as _sudoku_get_dataloaders
+        return _sudoku_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
+    if name in {"tinygsm", "TinyGSM", "gsm8k", "GSM8K"}:
+        from .tinygsm import get_dataloaders as _tinygsm_get_dataloaders
+        return _tinygsm_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'sudoku', 'tinygsm'."
     )

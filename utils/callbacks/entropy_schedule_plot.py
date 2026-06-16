@@ -125,7 +125,12 @@ class EntropySchedulePlotCallback(Callback):
                 it = iter(trainer.val_loader)
                 batch = next(it)
 
-            x0 = batch[0] if isinstance(batch, (tuple, list)) else batch
+            if isinstance(batch, dict):
+                x0 = batch["x0"]
+            elif isinstance(batch, (tuple, list)):
+                x0 = batch[0]
+            else:
+                x0 = batch
             x0 = x0.to(device, non_blocking=True)
 
             if batch_size is not None and x0.size(0) > batch_size:

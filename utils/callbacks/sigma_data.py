@@ -23,7 +23,13 @@ class SigmaDataEstimator(Callback):
         for k, batch in enumerate(trainer.train_loader):
             if k >= self.num_batches:
                 break
-            x = (batch[0] if isinstance(batch, (list, tuple)) else batch).to(trainer.device).float()
+            if isinstance(batch, dict):
+                _xb = batch["x0"]
+            elif isinstance(batch, (list, tuple)):
+                _xb = batch[0]
+            else:
+                _xb = batch
+            x = _xb.to(trainer.device).float()
             if x.max() > 1:
                 x = x / x.max()
 

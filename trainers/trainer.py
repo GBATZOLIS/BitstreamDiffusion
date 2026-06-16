@@ -1408,7 +1408,7 @@ class Trainer:
     # -----------------------------------------------------------------------------
     # Trainer method: full step_continuous
     # -----------------------------------------------------------------------------
-    def _step_continuous(self, x0, is_train: bool):
+    def _step_continuous(self, x0, is_train: bool, batch_prefix_mask=None):
         """
         Continuous score training step with optional CFG-style prefix conditioning.
 
@@ -1454,7 +1454,22 @@ class Trainer:
         cond_cfg = getattr(self.cfg, "cond", None)
         cond_enabled_cfg = (cond_cfg is not None) and bool(getattr(cond_cfg, "enabled", False))
 
-        if not cond_enabled_cfg:
+        # Per-example prefix mask supplied by the batch (task datasets: Sudoku /
+        # TinyGSM). It takes precedence over the config-derived fixed/random
+        # prompt length, enabling variable-length per-example prompts.
+        batch_pm = None
+        if batch_prefix_mask is not None:
+            batch_pm = batch_prefix_mask.to(self.device, non_blocking=True).view(B, -1).bool()
+            if batch_pm.shape[1] != S:
+                raise ValueError(
+                    f"batch_prefix_mask has {batch_pm.shape[1]} positions but x0 has S={S}"
+                )
+
+        if batch_pm is not None:
+            prefix_mask = batch_pm
+            cL_pos = None
+            cond_enabled = True
+        elif not cond_enabled_cfg:
             cond_enabled = False
             prefix_mask = None
             cL_pos = None
@@ -1470,9 +1485,11 @@ class Trainer:
         p_uncond = 0.0
 
         if cond_enabled:
-            noise_prefix = bool(getattr(cond_cfg, "noise_prefix", False))
-            suffix_only_loss = bool(getattr(cond_cfg, "loss_on_suffix_only", True))
-            p_uncond = float(getattr(cond_cfg, "p_uncond", 0.0))
+            # Defaults are clean-prefix + suffix-only loss, which is exactly the
+            # task (prompt/solution) regime; cfg.cond may still override.
+            noise_prefix = bool(getattr(cond_cfg, "noise_prefix", False)) if cond_cfg is not None else False
+            suffix_only_loss = bool(getattr(cond_cfg, "loss_on_suffix_only", True)) if cond_cfg is not None else True
+            p_uncond = float(getattr(cond_cfg, "p_uncond", 0.0)) if cond_cfg is not None else 0.0
             p_uncond = max(0.0, min(1.0, p_uncond))
 
         # ------------------------------------------------------------------
@@ -1667,7 +1684,10 @@ class Trainer:
 
         return loss.item()
 
-    def _step_discrete(self, x0, is_train: bool):
+    def _step_discrete(self, x0, is_train: bool, batch_prefix_mask=None):
+        # batch_prefix_mask is accepted for interface parity with _step_continuous.
+        # The task experiments use the continuous-score framework; discrete
+        # conditioning still flows through the config-derived path below.
         B, S = x0.shape
         x0_flat = x0.to(self.device, non_blocking=True).view(B, -1).long()
 
@@ -1739,6 +1759,23 @@ class Trainer:
 
     @torch.compiler.disable
     @torch.no_grad()
+    def _unpack_batch(self, batch):
+        """Return (x0, batch_prefix_mask).
+
+        Supports three batch formats:
+          - plain tensor                         -> (tensor, None)        [LM1B / OWT]
+          - (list/tuple)                         -> (batch[0], None)
+          - dict with keys 'x0' [, 'prefix_mask']-> (x0, prefix_mask)     [task datasets]
+
+        batch_prefix_mask, when present, is a per-example [B, S] bool mask marking
+        the conditioned prompt region (clamped clean, excluded from the loss).
+        """
+        if isinstance(batch, dict):
+            return batch["x0"], batch.get("prefix_mask", None)
+        if isinstance(batch, (list, tuple)):
+            return batch[0], None
+        return batch, None
+
     def _validate_epoch(self, step_fn):
         self.model.eval()
         self.ema.apply(self.model)
@@ -1749,8 +1786,8 @@ class Trainer:
         pbar = tqdm(self.val_loader, desc="Validating", leave=False, disable=not self.is_master)
 
         for batch in pbar:
-            x0 = batch[0] if isinstance(batch, (list, tuple)) else batch
-            loss = step_fn(x0, is_train=False)
+            x0, batch_prefix_mask = self._unpack_batch(batch)
+            loss = step_fn(x0, is_train=False, batch_prefix_mask=batch_prefix_mask)
             local_loss += loss
             local_count += 1.0
 
@@ -1951,8 +1988,8 @@ class Trainer:
                     if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
                         torch.compiler.cudagraph_mark_step_begin()
 
-                    x0 = batch[0] if isinstance(batch, (list, tuple)) else batch
-                    loss = step_fn(x0, is_train=True)
+                    x0, batch_prefix_mask = self._unpack_batch(batch)
+                    loss = step_fn(x0, is_train=True, batch_prefix_mask=batch_prefix_mask)
 
                     self.global_step += 1
                     train_loss += loss

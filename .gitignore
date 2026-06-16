@@ -71,3 +71,9 @@ generated_output.png
 # Crash dumps
 core
 core.*
+
+# task experiment artifacts (regenerable)
+datasets/sudoku/
+datasets/tinygsm/
+datasets/tinygsm_smoke/
+logs/tasks/
