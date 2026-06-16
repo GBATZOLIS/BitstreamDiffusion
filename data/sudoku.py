@@ -32,6 +32,7 @@ from ml_collections import config_dict
 
 from .sudoku_generator import generate_sudoku_dataset, DIFFICULTY_TO_CLUES
 from .task_codec import token_ids_to_bits, token_mask_to_bit_mask
+from .dist_build import rank0_first
 
 # ---- Canonical S-FLM constants ----
 VOCAB_SIZE = 12
@@ -76,24 +77,26 @@ def build_or_load_sudoku(
     root_p = Path(root)
     root_p.mkdir(parents=True, exist_ok=True)
     cache = _cache_path(root_p, difficulty, num_train, num_valid, seed)
-    if cache.exists() and not overwrite:
-        return torch.load(cache)
 
-    data = generate_sudoku_dataset(
-        num_train=num_train,
-        num_valid=num_valid,
-        difficulty=difficulty,
-        seed=seed,
-        tokenizer=SudokuTokenizer(),
-        num_workers=num_workers,
-    )
-    # Store as compact tensors.
-    out = {}
-    for split in ("train", "validation"):
-        ids = torch.tensor(data[split]["input_ids"], dtype=torch.uint8)  # vals < 12
-        out[split] = ids
-    torch.save(out, cache)
-    return out
+    # DDP-safe: only rank 0 generates; other ranks wait then load.
+    with rank0_first() as is_builder:
+        if is_builder and (overwrite or not cache.exists()):
+            data = generate_sudoku_dataset(
+                num_train=num_train,
+                num_valid=num_valid,
+                difficulty=difficulty,
+                seed=seed,
+                tokenizer=SudokuTokenizer(),
+                num_workers=num_workers,
+            )
+            out = {}
+            for split in ("train", "validation"):
+                out[split] = torch.tensor(data[split]["input_ids"], dtype=torch.uint8)
+            tmp = cache.with_suffix(cache.suffix + ".tmp")
+            torch.save(out, tmp)
+            tmp.replace(cache)  # atomic rename
+
+    return torch.load(cache)
 
 
 class SudokuDataset(Dataset):

@@ -31,6 +31,7 @@ from torch.utils.data import Dataset, DataLoader
 from ml_collections import config_dict
 
 from .task_codec import token_ids_to_bits, token_mask_to_bit_mask, bits_required
+from .dist_build import rank0_first
 
 DEFAULT_TOKENIZER = "HuggingFaceTB/SmolLM-135M"
 SEP = "\n"
@@ -80,7 +81,7 @@ def build_or_load_tinygsm(
     tag = f"tinygsm_bs{block_size}_answeronly_trainonpad_filtered_{safe}_cap{cap}_vr{val_ratio}_vs{val_seed}"
     meta_path = root_p / f"{tag}.meta.json"
 
-    if meta_path.exists() and not overwrite:
+    def _load():
         meta = json.loads(meta_path.read_text())
         out = {}
         for split in ("train", "validation"):
@@ -91,6 +92,19 @@ def build_or_load_tinygsm(
             out[split] = {"ids": ids, "prompt_len": plen}
         return out
 
+    # DDP-safe: only rank 0 tokenizes/writes the cache; others wait then load.
+    with rank0_first() as is_builder:
+        if is_builder and (overwrite or not meta_path.exists()):
+            _build_tinygsm_cache(
+                root_p=root_p, tag=tag, tokenizer_name=tokenizer_name,
+                block_size=block_size, val_ratio=val_ratio, val_seed=val_seed,
+                max_train_examples=max_train_examples,
+            )
+    return _load()
+
+
+def _build_tinygsm_cache(*, root_p, tag, tokenizer_name, block_size, val_ratio,
+                         val_seed, max_train_examples):
     from datasets import load_dataset
 
     tok = get_tokenizer(tokenizer_name)
@@ -135,16 +149,11 @@ def build_or_load_tinygsm(
         meta[split_name] = {"n": int(n)}
 
     meta["tokenizer_len"] = int(len(tok))
-    meta_path.write_text(json.dumps(meta, indent=2))
-
-    out = {}
-    for split_name in ("train", "validation"):
-        n = meta[split_name]["n"]
-        ids = np.memmap(root_p / f"{tag}_{split_name}_ids.uint16", dtype=np.uint16, mode="r",
-                        shape=(n, block_size))
-        plen = np.fromfile(root_p / f"{tag}_{split_name}_plen.int32", dtype=np.int32)
-        out[split_name] = {"ids": ids, "prompt_len": plen}
-    return out
+    # Write meta last (atomically) — its presence signals a complete cache.
+    meta_path = root_p / f"{tag}.meta.json"
+    tmp = meta_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    tmp.replace(meta_path)
 
 
 class TinyGSMDataset(Dataset):
