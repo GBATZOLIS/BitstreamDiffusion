@@ -121,7 +121,7 @@ def get_config():
     cfg.train = config_dict.ConfigDict()
     cfg.train.deterministic = False
     cfg.train.seed = 42
-    cfg.train.use_compile = True
+    cfg.train.use_compile = os.environ.get("USE_COMPILE", "1") == "1"
     cfg.train.compile_mode = "default"
     cfg.train.use_fp16 = True
     cfg.train.amp_dtype = "bf16"
