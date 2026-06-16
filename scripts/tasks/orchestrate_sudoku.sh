@@ -33,17 +33,22 @@ wait_finished hard
 
 # 3) evaluate each difficulty: deterministic (g=0) + stochastic churn sweep.
 echo "[orch] all training done — starting evals $(date)"
+# Evaluate BOTH EMA (headline, S-FLM-comparable) and raw weights, since EMA
+# (decay 0.9999) has only ~2 time constants of averaging at 20k steps.
 for d in easy medium hard; do
   CK="$(ckpt_of "$d")"
   echo "[orch] eval $d  ckpt=$CK"
-  for g in 0.0 0.05 0.10; do
-    if [ "$g" = "0.0" ]; then S=deterministic; else S=stochastic; fi
-    python -m evaluation.tasks.sudoku_eval \
-      --config configs/tasks/sudoku_bits.py \
-      --checkpoint "$CK" --difficulty "$d" \
-      --sampler "$S" --sampler_kind ddim --schedule entropic \
-      --gamma "$g" --steps 180 --limit 2000 \
-      >> "logs/tasks/eval_sudoku_${d}.log" 2>&1 || echo "[orch] eval $d g=$g FAILED"
+  for ema in 1 0; do
+    # deterministic (probability flow on the entropy grid) + EDM-churn sweep
+    for g in 0.0 0.05 0.10; do
+      if [ "$g" = "0.0" ]; then S=deterministic; else S=stochastic; fi
+      python -m evaluation.tasks.sudoku_eval \
+        --config configs/tasks/sudoku_bits.py \
+        --checkpoint "$CK" --difficulty "$d" \
+        --sampler "$S" --sampler_kind ddim --schedule entropic \
+        --gamma "$g" --steps 180 --limit 2000 --ema "$ema" \
+        >> "logs/tasks/eval_sudoku_${d}.log" 2>&1 || echo "[orch] eval $d ema=$ema g=$g FAILED"
+    done
   done
 done
 
@@ -56,8 +61,8 @@ for d in ("easy","medium","hard"):
     for f in sorted(glob.glob(base+"/sudoku_results_*.json")):
         r=json.load(open(f))
         acc=r.get("exact_match_accuracy",0.0)
-        tag=f"{r['sampler']}/g{r['gamma']}"
-        print(f"{d:6s} {tag:20s} exact={acc*100:6.2f}%  valid={r.get('valid_sudoku_rate',0)*100:5.1f}%  invalid_tok={r.get('invalid_token_rate',0)*100:.3f}%")
+        tag=f"{'ema' if r.get('ema',True) else 'raw'}/{r['sampler']}/g{r['gamma']}"
+        print(f"{d:6s} {tag:24s} exact={acc*100:6.2f}%  valid={r.get('valid_sudoku_rate',0)*100:5.1f}%  invalid_tok={r.get('invalid_token_rate',0)*100:.3f}%")
         if best is None or acc>best[0]: best=(acc,tag)
     if best: print(f"  -> {d} BEST: {best[1]} = {best[0]*100:.2f}%")
 PY

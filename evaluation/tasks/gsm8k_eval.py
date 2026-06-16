@@ -58,6 +58,7 @@ def main():
                     help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"])
     ap.add_argument("--gamma", type=float, default=0.0)
+    ap.add_argument("--ema", type=int, default=1, help="1=EMA weights (headline), 0=raw weights")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--limit", type=int, default=None)
@@ -77,7 +78,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model, sampler = load_model_and_sampler(
-        cfg, args.checkpoint, device, apply_ema=True, sampler_kind=args.sampler_kind)
+        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
@@ -149,7 +150,7 @@ def main():
         "timeout_s": timeout_s,
         "sample_records": records,
     }
-    tag = f"{args.sampler}_g{args.gamma}_s{steps}"
+    tag = f"{args.sampler}_g{args.gamma}_s{steps}_ema{int(bool(args.ema))}"
     out_path = out_dir / f"gsm8k_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== GSM8K RESULT ===")

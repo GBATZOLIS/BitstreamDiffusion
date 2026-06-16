@@ -84,6 +84,7 @@ def main():
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"],
                     help="sigma grid; entropic = trained entropy-rate schedule")
     ap.add_argument("--gamma", type=float, default=0.0, help="churn gamma; 0 => deterministic")
+    ap.add_argument("--ema", type=int, default=1, help="1=EMA weights (headline), 0=raw weights")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--limit", type=int, default=None, help="max validation puzzles")
@@ -103,7 +104,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model, sampler = load_model_and_sampler(
-        cfg, args.checkpoint, device, apply_ema=True, sampler_kind=args.sampler_kind)
+        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
@@ -171,6 +172,7 @@ def main():
         "checkpoint": str(args.checkpoint),
         "sampler": args.sampler,
         "gamma": args.gamma,
+        "ema": bool(args.ema),
         "steps": steps,
         "num_examples": n,
         "exact_match_accuracy": n_exact / max(1, n),
@@ -181,7 +183,7 @@ def main():
         "invalid_token_rate": n_invalid_tok / max(1, n_sol_tokens),
         "sample_records": records,
     }
-    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}"
+    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_ema{int(bool(args.ema))}"
     out_path = out_dir / f"sudoku_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== SUDOKU RESULT ===")
