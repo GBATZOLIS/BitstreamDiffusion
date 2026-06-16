@@ -80,6 +80,24 @@ are unchanged.
 
 ## Running
 
+The train scripts pre-build the dataset cache in a single process, then launch
+`torchrun`. Multi-GPU uses DDP (as on the cluster); for a single-GPU box run
+`python train.py` directly to avoid NCCL entirely:
+
+```bash
+# single GPU (no DDP) — robust everywhere
+SUDOKU_DIFFICULTY=easy USE_COMPILE=0 CUDA_VISIBLE_DEVICES=0 \
+  python scripts/tasks/prebuild_task.py --config configs/tasks/sudoku_bits.py
+SUDOKU_DIFFICULTY=easy USE_COMPILE=0 CUDA_VISIBLE_DEVICES=0 \
+  python train.py --config configs/tasks/sudoku_bits.py
+```
+
+> NCCL tip: if a multi-GPU launch hangs at the first `dist.barrier()` with a
+> "devices used by this process are currently unknown" warning, pass
+> `device_id=torch.device(f"cuda:{local_rank}")` to `init_process_group` in
+> `train.py`, or run single-GPU. This is environment-specific (it does not occur
+> on the GH200 nodes used for the released OWT runs).
+
 ### Sudoku (cheap; ~hours on a couple of GPUs)
 ```bash
 for d in easy medium hard; do
