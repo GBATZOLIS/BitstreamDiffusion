@@ -18,7 +18,7 @@ import torch
 from models import create_model
 from utils.ema import EMA
 from diffusion.continuous.processes import ContinuousForwardProcess
-from diffusion.continuous.samplers import HeunSampler
+from diffusion.continuous.samplers import HeunSampler, DDIMSampler
 
 
 def load_config(config_path: str):
@@ -38,8 +38,15 @@ def _clean_state_dict(sd: dict) -> dict:
     return out
 
 
-def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = True):
-    """Return (model, sampler). Applies EMA shadow weights if present."""
+def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = True,
+                           sampler_kind: str = "ddim"):
+    """Return (model, sampler). Applies EMA shadow weights if present.
+
+    sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
+    headline path (EDM-style stochastic churn on the entropy-rate sigma grid),
+    matching evaluation.generation_driver.create_sampler. 'heun' is available
+    for a 2nd-order ablation.
+    """
     model = create_model(cfg).to(device).eval()
     ckpt = torch.load(ckpt_path, map_location="cpu")
     model.load_state_dict(_clean_state_dict(ckpt["model"]), strict=False)
@@ -55,7 +62,14 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
             print(f"[task_eval] WARNING: failed to apply EMA ({e}); using raw weights")
 
     proc = ContinuousForwardProcess(cfg)
-    sampler = HeunSampler(model, proc, cfg)
+    kind = str(sampler_kind).lower()
+    if kind in {"ddim", "ddim_entropic", "entropic"}:
+        sampler = DDIMSampler(model, proc, cfg)
+    elif kind in {"heun", "karras"}:
+        sampler = HeunSampler(model, proc, cfg)
+    else:
+        raise ValueError(f"unknown sampler_kind={sampler_kind!r}")
+    print(f"[task_eval] sampler = {sampler.__class__.__name__}")
     return model, sampler
 
 

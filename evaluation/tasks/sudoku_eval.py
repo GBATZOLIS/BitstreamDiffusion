@@ -77,7 +77,12 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--difficulty", default=None, help="override (else from config/env)")
-    ap.add_argument("--sampler", default="stochastic", choices=["stochastic", "deterministic"])
+    ap.add_argument("--sampler", default="stochastic", choices=["stochastic", "deterministic"],
+                    help="stochastic => EDM-style churn (needs gamma>0); deterministic => no churn")
+    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun"],
+                    help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
+    ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"],
+                    help="sigma grid; entropic = trained entropy-rate schedule")
     ap.add_argument("--gamma", type=float, default=0.0, help="churn gamma; 0 => deterministic")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=256)
@@ -97,8 +102,9 @@ def main():
     out_dir = Path(args.out_dir or (run_dir / "sudoku_eval"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model, sampler = load_model_and_sampler(cfg, args.checkpoint, device, apply_ema=True)
-    schedule = "entropic" if args.sampler == "stochastic" else "karras"
+    model, sampler = load_model_and_sampler(
+        cfg, args.checkpoint, device, apply_ema=True, sampler_kind=args.sampler_kind)
+    schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
     ds = SudokuDataset(cfg, split="val")

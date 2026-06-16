@@ -39,8 +39,19 @@ Training is CoBit's Gaussian bitstream diffusion (matched-filter residual,
 binary score matching, EDM weighting, entropy-rate noise schedule). The prompt
 is conditioned by clamping the clean prompt bits at every solver step (same
 mechanism CoBit already uses for prefix conditioning; identical in spirit to
-S-FLM's `_project_prefix`). The headline sampler is the **entropy-rate
-stochastic** sampler; deterministic probability-flow is reported as an ablation.
+S-FLM's `_project_prefix`).
+
+**Eval sampler.** The headline path is CoBit's `ddim_entropic` sampler — the
+`DDIMSampler` integrating the probability-flow update on the entropy-rate sigma
+grid with **EDM-style stochastic churn** interleaved (`s_churn = γ·(NFE−1)`,
+`s_noise = 1.003`, full entropy band), exactly the path that produces the
+paper's GenPPL numbers (`evaluation/generation_driver.py::create_sampler`).
+`evaluation/tasks/_task_common.py` builds `DDIMSampler` by default
+(`sampler_kind="ddim"`); `--gamma 0` collapses it to deterministic probability
+flow on the same grid (reported as an ablation), and `sampler_kind="heun"` is a
+2nd-order ablation. Sweep `γ` (the diffusion "temperature") at eval — globally
+constrained Sudoku typically prefers small/zero churn, while GSM8K benefits from
+the stochastic operating point.
 
 A bitstream-specific failure mode that S-FLM does not have: decoded token ids
 can fall outside the vocabulary (Sudoku ids 12–15; SmolLM ids ≥ 49153). Both
