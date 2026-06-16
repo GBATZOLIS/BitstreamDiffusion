@@ -5,6 +5,7 @@
 #   NNODES/NODE_RANK/RDZV_ENDPOINT and launch one process group per node.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
 export SUDOKU_DIFFICULTY="${SUDOKU_DIFFICULTY:-easy}"
 export TOKENIZERS_PARALLELISM=false
@@ -13,6 +14,11 @@ NPROC="${NPROC:-2}"
 NNODES="${NNODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 RDZV_ENDPOINT="${RDZV_ENDPOINT:-localhost:29501}"
+
+# Pre-build the dataset cache once (single process) so no rank generates under DDP.
+if [ "${NODE_RANK}" = "0" ]; then
+  python scripts/tasks/prebuild_task.py --config configs/tasks/sudoku_bits.py
+fi
 
 torchrun --nnodes="${NNODES}" --node_rank="${NODE_RANK}" \
   --nproc_per_node="${NPROC}" --rdzv_backend=c10d --rdzv_endpoint="${RDZV_ENDPOINT}" \
