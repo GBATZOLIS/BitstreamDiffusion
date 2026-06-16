@@ -6,13 +6,15 @@ Official implementation of the paper:
 > Georgios Batzolis, Mark Girolami, Luca Ambrogioni
 > *arXiv preprint, 2026.* — [arXiv:2605.07013](https://arxiv.org/abs/2605.07013)
 
-We model text as a continuous diffusion process over fixed-width binary bitstreams. Semantic tokens are encoded as analog bit sequences; a matched-filter residual parameterization isolates contextual learning from analytic independent-bit posteriors; and an entropy-rate-gated stochastic sampler concentrates Langevin-type corrections in information-active noise regions. The resulting 130M-parameter model reaches GenPPL = **59.76** at matched real-data entropy on LM1B and GenPPL = **27.06** at entropy 5.26 on OpenWebText, both at 256 NFEs.
+We model text as a continuous diffusion process over fixed-width binary bitstreams. Semantic tokens are encoded as analog bit sequences; a matched-filter residual parameterization isolates contextual learning from analytic independent-bit posteriors; and an entropy-rate-gated stochastic sampler concentrates Langevin-type corrections in information-active noise regions. The resulting 130M-parameter model (**CoBit-S**) reaches GenPPL = **59.76** at matched real-data entropy on LM1B and GenPPL = **27.06** at entropy 5.26 on OpenWebText, both at 256 NFEs. Scaling to 462M (**CoBit-M**) reaches GenPPL = **19.48** at entropy 5.40 (256 NFE) and **9.87** at entropy 5.25 (512 NFE) on OpenWebText.
 
 ---
 
 ## Headline results
 
-All numbers below are from a single 130M-parameter SDT trunk per dataset; only the sampler differs between rows. Both models use the matched-filter residual parameterization, binary score matching with EDM weighting, and an entropy-rate noise schedule. See the paper for details.
+### CoBit-S (130M) — Table 1
+
+All rows below come from a single 130M-parameter SDT trunk per dataset; only the sampler differs. Both models use the matched-filter residual parameterization, binary score matching with EDM weighting, and an entropy-rate noise schedule. See the paper for details.
 
 | Dataset | Sampler | NFE | GenPPL ↓ | Entropy | Reproduces |
 |---|---|---|---|---|---|
@@ -23,6 +25,22 @@ All numbers below are from a single 130M-parameter SDT trunk per dataset; only t
 | OWT | Deterministic (probability flow) | 256 | 46.32 ± 0.93 | 5.13 | Table 1 |
 | OWT | **Stochastic (γ=0.130, full band)** | 256 | **27.06 ± 0.57** | **5.26** | Table 1 (headline) |
 | OWT | Stochastic (γ=0.180, full band) | 256 | 34.35 | 5.32 | §4.2 / Table 14 (high-entropy) |
+
+### CoBit-M (462M) — Table 2 (OpenWebText scaling)
+
+Scaling the same recipe to a 462M SDT trunk (`embed_dim 1024`, `n_blocks 24`,
+`n_heads 16`) moves the GenPPL–entropy frontier substantially. All rows are the
+EMA `step=000750000` checkpoint under the entropy-rate stochastic sampler;
+only the NFE budget / churn differs. Real OWT reference: GenPPL 15.07, entropy 5.44.
+
+| Sampler | NFE | γ | GenPPL ↓ | Entropy | Reproduces |
+|---|---|---|---|---|---|
+| **Stochastic (full band)** | 256 | 0.21 | **19.48** | 5.40 | Table 2 (plotted near-real-entropy point) |
+| Stochastic (full band) | 256 | 0.13 | 18.47 | 5.378 | Table 2 caption (low-perplexity 256-NFE point) |
+| Stochastic (full band) | 384 | 0.24 | 13.06 | 5.33 | Table 2 |
+| **Stochastic (full band)** | 512 | 0.26 | **9.87** | 5.25 | Table 2 |
+
+Reproduce every row in one run with [`configs/owt/eval_cobit_m_750K.py`](configs/owt/eval_cobit_m_750K.py) (see [Step 3](#step-3--evaluate)).
 
 ---
 
@@ -50,8 +68,10 @@ BitstreamDiffusion/
 │   │   ├── rate_bits_1M_edm_weight.py            # training
 │   │   └── eval/rate_eval_seeds.py               # evaluation (Table 1)
 │   └── owt/
-│       ├── rate_bits_edm_weight.py               # training
-│       └── eval_750K_seed.py                     # evaluation (Table 1 + high-entropy)
+│       ├── rate_bits_edm_weight.py                      # CoBit-S training (130M)
+│       ├── eval_750K_seed.py                            # CoBit-S eval (Table 1 + high-entropy)
+│       ├── rate_bits_edm_weight_medium_24x1024.py       # CoBit-M training (462M)
+│       └── eval_cobit_m_750K.py                         # CoBit-M eval (Table 2)
 └── scripts/
     ├── lm1b/                      # LM1B download + cache + semantic map
     ├── owt/                       # OWT codec training + cache prebuild
@@ -111,65 +131,36 @@ The fastest path is to download the released checkpoints and pre-built dataset c
 
 ### Step 1 — Download released artifacts
 
-We release the trained checkpoints and the OWT second-stage code tokenizer on Google Drive:
+We release the trained checkpoints and the OWT second-stage code tokenizer on
+the [Hugging Face Hub](https://huggingface.co/gbatzolis/CoBit). All checkpoints
+are **EMA weights** — evaluate them with the default settings (the eval configs
+load them with `apply_ema=True`, which is a no-op on these baked weights).
 
-| Artifact | Size | Destination | Direct link |
+| Artifact | Model | Size | Destination |
 |---|---|---|---|
-| LM1B checkpoint (1M steps, EMA) | 2.0 GB | `runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt` | [download](https://drive.google.com/file/d/1Ax6gCHuZvzGrSceTI5CeYbnNklI4qcS0/view?usp=sharing) |
-| OWT checkpoint (750K steps, EMA) | 2.0 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` | [download](https://drive.google.com/file/d/1XqhNN_vpvWTCbrxiSbxRDOcCUWMPkM81/view?usp=sharing) |
-| OWT 16-bit code tokenizer (`gpt2id_bpe16`) | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.json` | [download](https://drive.google.com/file/d/1XGHaGxW7D0nE8SeMG47n6d0GFix_QgZ0/view?usp=sharing) |
-| OWT tokenizer metadata | 1.3 KB | `datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.meta.json` | [download](https://drive.google.com/file/d/1TAOPKgtDHbOQUGGphncCXGazMeRq1DkZ/view?usp=sharing) |
-| LM1B entropy schedule — pdf | 1.7 KB | `assets/entropy_tables/lm1b/entropy_pdf.pt` | [download](https://drive.google.com/file/d/14CwyZbIUdbIzwKOsJ2HvXU72j0A32Kbp/view?usp=sharing) |
-| LM1B entropy schedule — cdf | 1.7 KB | `assets/entropy_tables/lm1b/entropy_cdf.pt` | [download](https://drive.google.com/file/d/1LAMW82ccHZgeErh2h9I0-YmcDxU4n7Ve/view?usp=sharing) |
-| LM1B entropy schedule — sigmas | 1.7 KB | `assets/entropy_tables/lm1b/entropy_sigmas.pt` | [download](https://drive.google.com/file/d/1tevq_HcwB67V_w7nKED3v0Jl2OLJYmIP/view?usp=sharing) |
-| LM1B entropy schedule — edges | 1.7 KB | `assets/entropy_tables/lm1b/entropy_edges.pt` | [download](https://drive.google.com/file/d/1v1617PJGAczFG5L0MBdBLln06otGGaLy/view?usp=sharing) |
-| OWT entropy schedule — pdf | 1.7 KB | `assets/entropy_tables/owt/entropy_pdf.pt` | [download](https://drive.google.com/file/d/1wUtZbxIrxBFs6atYME6xcMm5NgYfwFel/view?usp=sharing) |
-| OWT entropy schedule — cdf | 1.7 KB | `assets/entropy_tables/owt/entropy_cdf.pt` | [download](https://drive.google.com/file/d/1ktggtMf-waPCrgE1pt8I1sUeimcAZ23R/view?usp=sharing) |
-| OWT entropy schedule — sigmas | 1.7 KB | `assets/entropy_tables/owt/entropy_sigmas.pt` | [download](https://drive.google.com/file/d/1oWmarLOSWiBIrKK5d8Qt0XDhlCJGgBHD/view?usp=sharing) |
-| OWT entropy schedule — edges | 1.7 KB | `assets/entropy_tables/owt/entropy_edges.pt` | [download](https://drive.google.com/file/d/1eeLXfbtFy_eANVXhCH-21E28QDX2tw4-/view?usp=sharing) |
+| `checkpoints/cobit_s_lm1b_1M_ema.pt`   | CoBit-S LM1B (1M)   | 0.53 GB | `runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt` |
+| `checkpoints/cobit_s_owt_750k_ema.pt`  | CoBit-S OWT (750K)  | 0.54 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` |
+| `checkpoints/cobit_m_owt_750k_ema.pt`  | **CoBit-M OWT (750K)** | 1.85 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_medium_24x1024/checkpoints/step=000750000.pt` |
+| `tokenizer/…_base1024.json` + `.meta.json` | OWT 16-bit code tokenizer | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/` |
+| `entropy_tables/{lm1b,owt,owt_medium}/…` | entropy-rate schedules | ~7 KB ea. | `assets/entropy_tables/` (also ships in this repo) |
 
-The expected paths above are exactly the ones referenced by the training and evaluation configs — no path edits needed. **The entropy schedule artefacts also ship in this repository** under [`assets/entropy_tables/`](assets/entropy_tables/), so the Drive copies are a redundant mirror — only download them if you removed the in-repo bundle for some reason.
-
-#### One-shot download via `gdown`
+#### One-shot download (places files in the exact expected paths)
 
 ```bash
-pip install gdown
+python -m pip install "huggingface_hub>=0.23"
 
-# LM1B checkpoint (2 GB)
-mkdir -p runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints
-gdown 1Ax6gCHuZvzGrSceTI5CeYbnNklI4qcS0 \
-  -O "runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt"
+# All three checkpoints + the OWT code tokenizer:
+python scripts/download_from_hf.py --repo-id gbatzolis/CoBit
 
-# OWT checkpoint (2 GB)
-mkdir -p runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints
-gdown 1XqhNN_vpvWTCbrxiSbxRDOcCUWMPkM81 \
-  -O "runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt"
-
-# OWT 16-bit code tokenizer (json + metadata)
-mkdir -p datasets/openwebtext_gpt2_trainm100k
-gdown 1XGHaGxW7D0nE8SeMG47n6d0GFix_QgZ0 \
-  -O datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.json
-gdown 1TAOPKgtDHbOQUGGphncCXGazMeRq1DkZ \
-  -O datasets/openwebtext_gpt2_trainm100k/tokenizer_gpt2id_bpe16_65536_base1024.meta.json
-
-# (Optional) Re-fetch the entropy schedule tables — these already ship in the
-# repo under assets/entropy_tables/, so you only need this if you removed them.
-mkdir -p assets/entropy_tables/lm1b assets/entropy_tables/owt
-gdown 14CwyZbIUdbIzwKOsJ2HvXU72j0A32Kbp -O assets/entropy_tables/lm1b/entropy_pdf.pt
-gdown 1LAMW82ccHZgeErh2h9I0-YmcDxU4n7Ve -O assets/entropy_tables/lm1b/entropy_cdf.pt
-gdown 1tevq_HcwB67V_w7nKED3v0Jl2OLJYmIP -O assets/entropy_tables/lm1b/entropy_sigmas.pt
-gdown 1v1617PJGAczFG5L0MBdBLln06otGGaLy -O assets/entropy_tables/lm1b/entropy_edges.pt
-gdown 1wUtZbxIrxBFs6atYME6xcMm5NgYfwFel -O assets/entropy_tables/owt/entropy_pdf.pt
-gdown 1ktggtMf-waPCrgE1pt8I1sUeimcAZ23R -O assets/entropy_tables/owt/entropy_cdf.pt
-gdown 1oWmarLOSWiBIrKK5d8Qt0XDhlCJGgBHD -O assets/entropy_tables/owt/entropy_sigmas.pt
-gdown 1eeLXfbtFy_eANVXhCH-21E28QDX2tw4- -O assets/entropy_tables/owt/entropy_edges.pt
-
-# Verify the entropy artefacts match what the released checkpoints expect.
-# Should print "OK" for each of the 8 files; mismatches indicate corruption.
-( cd assets/entropy_tables && sha256sum -c SHA256SUMS )
+# …or just the CoBit-M (462M) model:
+python scripts/download_from_hf.py --repo-id gbatzolis/CoBit --models cobit_m
 ```
 
-`gdown` handles Google Drive's "large file" interstitial automatically and resumes interrupted transfers. The LM1B checkpoint goes directly into the path the LM1B eval config expects; same for OWT.
+`scripts/download_from_hf.py` resolves each file from the Hub and copies it into
+the directory the training / evaluation configs read — no manual path edits. The
+entropy-rate tables already ship in this repository under
+[`assets/entropy_tables/`](assets/entropy_tables/), so they are not fetched by
+default (pass `--entropy-tables` to restore them if you deleted the in-repo copy).
 
 #### A note on the entropy schedule artefacts
 
@@ -186,11 +177,14 @@ entropy_edges.pt    # bin edges in σ-space
 ```
 
 These files **ship with the repository** under
-[`assets/entropy_tables/lm1b/`](assets/entropy_tables/lm1b/) and
-[`assets/entropy_tables/owt/`](assets/entropy_tables/owt/), and both eval
-configs reference those paths via `cfg.evaluation.entropy_run_dir`. The
-Drive links above are a redundant mirror — there's normally nothing to
-download.
+[`assets/entropy_tables/lm1b/`](assets/entropy_tables/lm1b/),
+[`assets/entropy_tables/owt/`](assets/entropy_tables/owt/) (CoBit-S), and
+[`assets/entropy_tables/owt_medium/`](assets/entropy_tables/owt_medium/)
+(CoBit-M), and every eval config references the matching path via
+`cfg.evaluation.entropy_run_dir`. The CoBit-M profile is **distinct** from the
+CoBit-S OWT profile — the 462M model was trained with its own entropy-rate
+schedule, so `eval_cobit_m_750K.py` points at `owt_medium`, not `owt`. There's
+normally nothing to download; the Hub copy is a redundant mirror.
 
 > ⚠️  If the entropy tables for the requested dataset are missing, the
 > sampler **hard-errors** rather than silently falling back to a Karras
@@ -324,6 +318,36 @@ This sweeps three operating points in a single run:
 | 0.175 | 256 | Frontier point | GenPPL ≈ 34, entropy ≈ 5.31 |
 | 0.180 | 256 | §4.2 high-entropy / Table 14 sample | GenPPL ≈ 34, entropy ≈ 5.32 |
 
+**CoBit-M / 462M (reproduces Table 2, OpenWebText scaling):**
+
+```bash
+# All three Table-2 rows (256/384/512 NFE) in one run. Add the low-PPL
+# 256-NFE caption point with EVAL_CELLS=all.
+bash scripts/owt/eval_cobit_m.sh                 # 2 GPUs (default)
+NPROC=1 bash scripts/owt/eval_cobit_m.sh         # single GPU
+EVAL_CELLS=all bash scripts/owt/eval_cobit_m.sh  # + the γ=0.13 caption point
+```
+
+The launcher runs generation + GenPPL and then the post-hoc token-unigram
+entropy estimator. Equivalent explicit form:
+
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  -m evaluation.run_eval --config configs/owt/eval_cobit_m_750K.py --metrics external_ppl
+python -m evaluation.compute_entropy_from_caches --config configs/owt/eval_cobit_m_750K.py
+```
+
+This sweeps the Table-2 operating points in a single run (`EVAL_CELLS=table2`):
+
+| γ | NFE | Reproduces | Expected (single seed) |
+|---|---|---|---|
+| 0.21 | 256 | Table 2 (plotted point) | GenPPL ≈ 19.5, entropy ≈ 5.40 |
+| 0.24 | 384 | Table 2 | GenPPL ≈ 13.1, entropy ≈ 5.33 |
+| 0.26 | 512 | Table 2 | GenPPL ≈ 9.9, entropy ≈ 5.25 |
+| 0.13 | 256 | Table 2 caption (low-PPL) | GenPPL ≈ 18.5, entropy ≈ 5.38 |
+
+Outputs land at `runs/.../continuous_rate_raw_binary_bits_medium_24x1024/evaluation_cobit_m_table2_step000750000/results.{csv,jsonl}`. GenPPL agrees with the paper to within seed/hardware noise (Table-1-style ±0.5).
+
 #### Multi-seed evaluation
 
 The paper reports mean ± std across 10 seeds. To replicate, loop the seed:
@@ -345,7 +369,7 @@ Provided SLURM templates [`scripts/smoketest_lm1b.sh`](scripts/smoketest_lm1b.sh
 
 ## Training from scratch
 
-Both training configs implement the exact protocol described in Appendix B of the paper: 12-block / 768-d SDT trunk, AdamW (lr = 3 × 10⁻⁴, cosine decay, 2.5K warmup), global batch size 512, BF16, EDM loss weighting, entropy-rate noise schedule with 40K-step warmup and 10K-step transition, self-conditioning probability 0.5 with carry-mode at sampling.
+The CoBit-S training configs implement the exact protocol described in Appendix B of the paper: 12-block / 768-d SDT trunk, AdamW (lr = 3 × 10⁻⁴, cosine decay, 2.5K warmup), global batch size 512, BF16, EDM loss weighting, entropy-rate noise schedule with 40K-step warmup and 10K-step transition, self-conditioning probability 0.5 with carry-mode at sampling. CoBit-M keeps this protocol unchanged except for the trunk (1024-d / 24 blocks / 16 heads), a more conservative lr = 2 × 10⁻⁴ and 5K warmup at the larger scale.
 
 The hardware below matches what we actually used to produce the released checkpoints. Other configurations (more or fewer GPUs) work identically as long as the per-step global batch size stays at 512 — the trainer divides the global batch evenly across the world size.
 
@@ -354,10 +378,16 @@ The hardware below matches what we actually used to produce the released checkpo
 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   train.py --config configs/lm1b/continuous/rate_bits_1M_edm_weight.py
 
-# OpenWebText — 1,000,000 optimizer steps. ~6 days on 4 × NVIDIA GH200, global batch 512.
+# OpenWebText — CoBit-S (130M). ~6 days on 4 × NVIDIA GH200, global batch 512.
 # Paper-reported numbers use the step=000750000.pt checkpoint; training continues to 1M.
 torchrun --standalone --nnodes=1 --nproc_per_node=4 \
   train.py --config configs/owt/rate_bits_edm_weight.py
+
+# OpenWebText — CoBit-M (462M, Table 2). 2 × GH200 nodes (8 GPUs), global batch 512.
+# Same recipe; only the trunk grows (1024-d / 24 blocks / 16 heads) and lr 2e-4 / warmup 5K.
+# Table-2 numbers use the step=000750000.pt checkpoint.
+torchrun --standalone --nnodes=1 --nproc_per_node=8 \
+  train.py --config configs/owt/rate_bits_edm_weight_medium_24x1024.py
 ```
 
 Checkpoints are written every 50,000 steps (and a rolling `last.pt` every 5,000 steps for resume) to `runs/<cfg.experiment>/checkpoints/`. Training auto-resumes from `last.pt` if the run directory already exists.
@@ -372,8 +402,10 @@ Multi-node DDP is supported via standard `torchrun` flags (`--nnodes`, `--nproc_
 |---|---|
 | [`configs/lm1b/continuous/rate_bits_1M_edm_weight.py`](configs/lm1b/continuous/rate_bits_1M_edm_weight.py) | LM1B training (1M steps) |
 | [`configs/lm1b/continuous/eval/rate_eval_seeds.py`](configs/lm1b/continuous/eval/rate_eval_seeds.py) | LM1B evaluation: γ ∈ {0.185, 0.200} stochastic specs |
-| [`configs/owt/rate_bits_edm_weight.py`](configs/owt/rate_bits_edm_weight.py) | OWT training (1M-step schedule; 750K used in paper) |
-| [`configs/owt/eval_750K_seed.py`](configs/owt/eval_750K_seed.py) | OWT evaluation: γ ∈ {0.13, 0.175, 0.18} stochastic specs |
+| [`configs/owt/rate_bits_edm_weight.py`](configs/owt/rate_bits_edm_weight.py) | CoBit-S OWT training (1M-step schedule; 750K used in paper) |
+| [`configs/owt/eval_750K_seed.py`](configs/owt/eval_750K_seed.py) | CoBit-S OWT evaluation: γ ∈ {0.13, 0.175, 0.18} stochastic specs (Table 1) |
+| [`configs/owt/rate_bits_edm_weight_medium_24x1024.py`](configs/owt/rate_bits_edm_weight_medium_24x1024.py) | CoBit-M OWT training (462M; 750K used in paper) |
+| [`configs/owt/eval_cobit_m_750K.py`](configs/owt/eval_cobit_m_750K.py) | CoBit-M OWT evaluation: 256/384/512-NFE Table-2 operating points |
 
 The discrete-diffusion bitstream baseline (Appendix C) is exposed via `configs/lm1b/discrete/`.
 
