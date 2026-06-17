@@ -18,7 +18,8 @@ set -euo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 
-source /home/u6ms/gb511.u6ms/envs/pytorch/bin/activate
+# conda-pack activate references unset vars under `set -u`; disable nounset for the source.
+set +u; source /home/u6ms/gb511.u6ms/envs/pytorch/bin/activate; set -u
 export HF_HOME=/projects/u6ms/gb511/projects/BitstreamDiffusion/hf_cache
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
