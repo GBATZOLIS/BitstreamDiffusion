@@ -111,42 +111,88 @@ def _build_tinygsm_cache(*, root_p, tag, tokenizer_name, block_size, val_ratio,
     bos, eos, pad = _special_ids(tok)
     sep_ids = tok(SEP, add_special_tokens=False).input_ids
 
+    BATCH = 50_000
+
+    def _tok_rows(q_list, a_list):
+        """Batch-encode (fast/rayon-parallel tokenizer) -> iterator of (q_ids, a_ids)."""
+        q_enc = tok([q.strip() for q in q_list], add_special_tokens=False)["input_ids"]
+        a_enc = tok([a.strip() for a in a_list], add_special_tokens=False)["input_ids"]
+        return zip(q_enc, a_enc)
+
+    def _emit(row_arr, plen_arr, w, q_ids, a_ids):
+        """Assemble [BOS] q sep a [EOS] into preallocated buffers at index w.
+
+        Buffers are pre-filled with `pad`, so we only write up to EOS (the rest
+        stays padded). Returns the new write head (unchanged if filtered out).
+        """
+        total = 2 + len(q_ids) + len(sep_ids) + len(a_ids)  # +bos +eos
+        if total > block_size:
+            return w  # filter_too_long = True
+        r = row_arr[w]
+        p = 0
+        r[p] = bos; p += 1
+        r[p:p + len(q_ids)] = q_ids; p += len(q_ids)
+        r[p:p + len(sep_ids)] = sep_ids; p += len(sep_ids)
+        r[p:p + len(a_ids)] = a_ids; p += len(a_ids)
+        r[p] = eos
+        plen_arr[w] = 1 + len(q_ids) + len(sep_ids)
+        return w + 1
+
+    def _write(split_name, ids_arr, plen_arr, w):
+        ids_arr[:w].tofile(root_p / f"{tag}_{split_name}_ids.uint16")
+        plen_arr[:w].tofile(root_p / f"{tag}_{split_name}_plen.int32")
+        return {"n": int(w)}  # _load() reads meta[split]["n"]
+
+    meta = {}
+
     if max_train_examples is not None:
-        # Smoke / capped path: stream to avoid downloading the full corpus.
+        # Smoke / capped path: stream a small subset (no full download).
         stream = load_dataset("TinyGSM/TinyGSM", split="train", streaming=True)
         rows = []
         for i, ex in enumerate(stream):
             if i >= int(max_train_examples):
                 break
-            rows.append({"question": ex["question"], "code": ex["code"]})
+            rows.append((ex["question"], ex["code"]))
         n_val = max(1, int(len(rows) * val_ratio))
-        splits = {"train": rows[:-n_val], "validation": rows[-n_val:]}
+        parts = {"train": rows[:-n_val], "validation": rows[-n_val:]}
+        for split_name, rws in parts.items():
+            cap = len(rws)
+            ids_arr = np.full((cap, block_size), pad, dtype=np.uint16)
+            plen_arr = np.empty((cap,), dtype=np.int32)
+            w = 0
+            for i in range(0, cap, BATCH):
+                chunk = rws[i:i + BATCH]
+                for q_ids, a_ids in _tok_rows([c[0] for c in chunk], [c[1] for c in chunk]):
+                    w = _emit(ids_arr, plen_arr, w, q_ids, a_ids)
+            meta[split_name] = _write(split_name, ids_arr, plen_arr, w)
     else:
+        # Full corpus: ONE sequential pass over the unshuffled arrow (sequential
+        # I/O — avoids the random-access reads a shuffled train_test_split induces
+        # on Lustre), routing each row into a seeded 1% val holdout. Tokenization
+        # is batched (fast/rayon-parallel); preallocated uint16 buffers keep memory
+        # bounded vs. building Python lists of lists.
         ds = load_dataset("TinyGSM/TinyGSM", split="train")
-        split = ds.train_test_split(test_size=val_ratio, seed=val_seed)
-        splits = {"train": split["train"], "validation": split["test"]}
+        N = len(ds)
+        n_val = max(1, int(N * val_ratio))
+        rng = np.random.default_rng(val_seed)
+        is_val = np.zeros(N, dtype=bool)
+        is_val[rng.permutation(N)[:n_val]] = True
 
-    meta = {}
-    for split_name, subset in splits.items():
-        ids_buf = []
-        plen_buf = []
-        for ex in subset:
-            q_ids = tok(ex["question"].strip(), add_special_tokens=False).input_ids
-            a_ids = tok(ex["code"].strip(), add_special_tokens=False).input_ids
-            ids = [bos] + q_ids + sep_ids + a_ids + [eos]
-            prompt_len = 1 + len(q_ids) + len(sep_ids)
-            if len(ids) > block_size:
-                continue  # filter_too_long = True
-            ids = ids + [pad] * (block_size - len(ids))
-            ids_buf.append(ids)
-            plen_buf.append(prompt_len)
-
-        n = len(ids_buf)
-        arr = np.asarray(ids_buf, dtype=np.uint16) if n else np.zeros((0, block_size), np.uint16)
-        plen = np.asarray(plen_buf, dtype=np.int32)
-        arr.tofile(root_p / f"{tag}_{split_name}_ids.uint16")
-        plen.tofile(root_p / f"{tag}_{split_name}_plen.int32")
-        meta[split_name] = {"n": int(n)}
+        train_ids = np.full((N - n_val, block_size), pad, dtype=np.uint16)
+        train_plen = np.empty((N - n_val,), dtype=np.int32)
+        val_ids = np.full((n_val, block_size), pad, dtype=np.uint16)
+        val_plen = np.empty((n_val,), dtype=np.int32)
+        tw = vw = 0
+        gi = 0
+        for batch in ds.iter(batch_size=BATCH):
+            for q_ids, a_ids in _tok_rows(batch["question"], batch["code"]):
+                if is_val[gi]:
+                    vw = _emit(val_ids, val_plen, vw, q_ids, a_ids)
+                else:
+                    tw = _emit(train_ids, train_plen, tw, q_ids, a_ids)
+                gi += 1
+        meta["train"] = _write("train", train_ids, train_plen, tw)
+        meta["validation"] = _write("validation", val_ids, val_plen, vw)
 
     meta["tokenizer_len"] = int(len(tok))
     # Write meta last (atomically) — its presence signals a complete cache.
