@@ -64,10 +64,20 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sigma_min", type=float, default=None)
+    ap.add_argument("--sigma_data", type=float, default=None,
+                    help="Override EDM preconditioning sigma_data used at sampling "
+                         "(feeds c_in=1/sqrt(sigma^2+sigma_data^2) in the denoiser). "
+                         "Default: config value (0.5). The value the model was TRAINED "
+                         "with is the SigmaDataEstimator estimate (~0.40); pass it here "
+                         "to test train/eval-matched preconditioning.")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.sigma_data is not None:
+        # Override BEFORE building the model; the denoiser reads this at every step.
+        cfg.diffusion.continuous.sigma_data = float(args.sigma_data)
+    sigma_data_used = float(cfg.diffusion.continuous.sigma_data)
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 1024))
     timeout_s = float(getattr(getattr(cfg.evaluation, "gsm8k", object()), "timeout_s", 5.0))
     n_boot = int(getattr(getattr(cfg.evaluation, "gsm8k", object()), "bootstrap_size", 10000))
@@ -140,6 +150,7 @@ def main():
         "sampler": args.sampler,
         "gamma": args.gamma,
         "steps": steps,
+        "sigma_data": sigma_data_used,
         "num_examples": int(n),
         "accuracy": float(correct.mean()) if n else 0.0,
         "bootstrap_accuracy": acc,
@@ -150,7 +161,7 @@ def main():
         "timeout_s": timeout_s,
         "sample_records": records,
     }
-    tag = f"{args.sampler}_g{args.gamma}_s{steps}_ema{int(bool(args.ema))}"
+    tag = f"{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
     out_path = out_dir / f"gsm8k_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== GSM8K RESULT ===")

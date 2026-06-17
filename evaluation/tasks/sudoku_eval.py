@@ -90,12 +90,23 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="max validation puzzles")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sigma_min", type=float, default=None, help="terminal sigma override")
+    ap.add_argument("--sigma_data", type=float, default=None,
+                    help="Override EDM preconditioning sigma_data used at sampling "
+                         "(feeds c_in=1/sqrt(sigma^2+sigma_data^2) in the denoiser). "
+                         "Default: config value (0.5). The value the model was TRAINED "
+                         "with is the SigmaDataEstimator estimate (see training log: "
+                         "'sigma_data estimated: ...'); pass it here to test "
+                         "train/eval-matched preconditioning.")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     if args.difficulty:
         cfg.data.difficulty = args.difficulty
+    if args.sigma_data is not None:
+        # Override BEFORE building the model; the denoiser reads this at every step.
+        cfg.diffusion.continuous.sigma_data = float(args.sigma_data)
+    sigma_data_used = float(cfg.diffusion.continuous.sigma_data)
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 180))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -174,6 +185,7 @@ def main():
         "gamma": args.gamma,
         "ema": bool(args.ema),
         "steps": steps,
+        "sigma_data": sigma_data_used,
         "num_examples": n,
         "exact_match_accuracy": n_exact / max(1, n),
         "grid_exact_match": n_grid / max(1, n),
@@ -183,7 +195,7 @@ def main():
         "invalid_token_rate": n_invalid_tok / max(1, n_sol_tokens),
         "sample_records": records,
     }
-    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_ema{int(bool(args.ema))}"
+    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
     out_path = out_dir / f"sudoku_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== SUDOKU RESULT ===")
