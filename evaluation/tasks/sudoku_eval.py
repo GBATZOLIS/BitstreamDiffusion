@@ -32,6 +32,7 @@ from data.sudoku import (
 from data.task_codec import bits_to_token_ids
 from evaluation.tasks._task_common import (
     load_config, load_model_and_sampler, configure_stochastic, sample_bits,
+    resolve_sigma_data,
 )
 
 GRID_START_PUZZLE = 1
@@ -103,16 +104,15 @@ def main():
     cfg = load_config(args.config)
     if args.difficulty:
         cfg.data.difficulty = args.difficulty
-    if args.sigma_data is not None:
-        # Override BEFORE building the model; the denoiser reads this at every step.
-        cfg.diffusion.continuous.sigma_data = float(args.sigma_data)
-    sigma_data_used = float(cfg.diffusion.continuous.sigma_data)
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 180))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     run_dir = Path(args.checkpoint).resolve().parent.parent
     out_dir = Path(args.out_dir or (run_dir / "sudoku_eval"))
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the sigma_data the model was TRAINED with (sidecar) unless overridden.
+    sigma_data_used, _ = resolve_sigma_data(cfg, run_dir, args.sigma_data)
 
     model, sampler = load_model_and_sampler(
         cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)

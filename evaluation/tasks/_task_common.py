@@ -10,6 +10,7 @@ exactly as in S-FLM's _project_prefix.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,37 @@ def load_config(config_path: str):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.get_config()
+
+
+def resolve_sigma_data(cfg, run_dir, cli_override):
+    """Resolve the EDM preconditioning sigma_data used at SAMPLING and set it on cfg.
+
+    The denoiser uses c_in = 1/sqrt(sigma^2 + sigma_data^2) at every step, so eval
+    must use the SAME sigma_data the model was trained with. Training overwrites it
+    via SigmaDataEstimator and persists it to <run_dir>/sigma_data.json; the task
+    configs hardcode 0.5, which usually does NOT match. Precedence:
+
+        CLI override  >  trained sidecar (run_dir/sigma_data.json)  >  config default
+
+    Returns (value, source_str). Falling back to the config default emits a loud
+    warning so we never silently sample with the wrong (0.5) preconditioning.
+    """
+    sidecar = Path(run_dir) / "sigma_data.json"
+    if cli_override is not None:
+        val = float(cli_override)
+        src = f"CLI --sigma_data={val:.4f}"
+    elif sidecar.exists():
+        val = float(json.loads(sidecar.read_text())["sigma_data"])
+        src = f"trained value from {sidecar.name} ({val:.4f})"
+    else:
+        val = float(cfg.diffusion.continuous.sigma_data)
+        src = (f"config default ({val:.4f})  ***WARNING***: no {sidecar.name} found and "
+               f"no --sigma_data given; this is the hardcoded config value and likely "
+               f"does NOT match training. Pass --sigma_data or write {sidecar}.")
+        print("!" * 80, flush=True)
+    cfg.diffusion.continuous.sigma_data = val
+    print(f"[sigma_data] sampling with sigma_data={val:.4f}  (source: {src})", flush=True)
+    return val, src
 
 
 def _clean_state_dict(sd: dict) -> dict:

@@ -28,6 +28,7 @@ from data.tinygsm import GSM8KTestDataset
 from data.task_codec import bits_to_token_ids
 from evaluation.tasks._task_common import (
     load_config, load_model_and_sampler, configure_stochastic, sample_bits,
+    resolve_sigma_data,
 )
 from evaluation.tasks.sandbox_gsm8k import evaluate_samples
 
@@ -74,10 +75,6 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    if args.sigma_data is not None:
-        # Override BEFORE building the model; the denoiser reads this at every step.
-        cfg.diffusion.continuous.sigma_data = float(args.sigma_data)
-    sigma_data_used = float(cfg.diffusion.continuous.sigma_data)
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 1024))
     timeout_s = float(getattr(getattr(cfg.evaluation, "gsm8k", object()), "timeout_s", 5.0))
     n_boot = int(getattr(getattr(cfg.evaluation, "gsm8k", object()), "bootstrap_size", 10000))
@@ -86,6 +83,9 @@ def main():
     run_dir = Path(args.checkpoint).resolve().parent.parent
     out_dir = Path(args.out_dir or (run_dir / "gsm8k_eval"))
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the sigma_data the model was TRAINED with (sidecar) unless overridden.
+    sigma_data_used, _ = resolve_sigma_data(cfg, run_dir, args.sigma_data)
 
     model, sampler = load_model_and_sampler(
         cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)
