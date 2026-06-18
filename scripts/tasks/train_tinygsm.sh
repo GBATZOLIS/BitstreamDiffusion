@@ -11,12 +11,14 @@ NPROC="${NPROC:-2}"
 NNODES="${NNODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 RDZV_ENDPOINT="${RDZV_ENDPOINT:-localhost:29502}"
+CONFIG="${CONFIG:-configs/tasks/tinygsm_bits.py}"   # override for the CFG variant
 
 # Pre-build the tokenized cache once (single process) so no rank tokenizes under DDP.
+# (Cache is shared across configs with the same tokenizer/len/split.)
 if [ "${NODE_RANK}" = "0" ]; then
-  python scripts/tasks/prebuild_task.py --config configs/tasks/tinygsm_bits.py
+  python scripts/tasks/prebuild_task.py --config "${CONFIG}"
 fi
 
 torchrun --nnodes="${NNODES}" --node_rank="${NODE_RANK}" \
   --nproc_per_node="${NPROC}" --rdzv_backend=c10d --rdzv_endpoint="${RDZV_ENDPOINT}" \
-  train.py --config configs/tasks/tinygsm_bits.py
+  train.py --config "${CONFIG}"
