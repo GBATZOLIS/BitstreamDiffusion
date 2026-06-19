@@ -19,6 +19,11 @@ if [ "${NODE_RANK}" = "0" ]; then
   python scripts/tasks/prebuild_task.py --config "${CONFIG}"
 fi
 
+# --max-restarts: if a worker dies (e.g. the intermittent epoch-end NCCL collective
+# timeout -> SIGABRT seen on this cluster), torchrun restarts the local workers and
+# train.py resumes from last.pt -- self-healing WITHIN the allocation, no resubmit.
+MAX_RESTARTS="${MAX_RESTARTS:-3}"
 torchrun --nnodes="${NNODES}" --node_rank="${NODE_RANK}" \
   --nproc_per_node="${NPROC}" --rdzv_backend=c10d --rdzv_endpoint="${RDZV_ENDPOINT}" \
+  --max-restarts="${MAX_RESTARTS}" \
   train.py --config "${CONFIG}"
