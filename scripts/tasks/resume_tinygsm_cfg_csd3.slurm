@@ -24,7 +24,8 @@ CONFIG_PATH="configs/tasks/tinygsm_bits_cfg.py"
 CACHE_META_GLOB="datasets/tinygsm/"*.meta.json
 TARGET_STEPS="${TINYGSM_TOTAL_STEPS:?set TINYGSM_TOTAL_STEPS (e.g. 500000)}"
 export TINYGSM_TOTAL_STEPS="$TARGET_STEPS"
-FINAL_CKPT="runs/tasks/tinygsm/cobit_raw_binary_bits_cfg/checkpoints/step=$(printf '%09d' "$TARGET_STEPS").pt"
+CKPT_DIR="runs/tasks/tinygsm/cobit_raw_binary_bits_cfg/checkpoints"
+FINAL_CKPT="$CKPT_DIR/step=$(printf '%09d' "$TARGET_STEPS").pt"
 SELF="scripts/tasks/resume_tinygsm_cfg_csd3.slurm"
 CHAIN_REMAINING="${CHAIN_REMAINING:-6}"
 
@@ -34,6 +35,22 @@ fi
 if [[ -f "$FINAL_CKPT" ]]; then
     echo "Target checkpoint exists ($FINAL_CKPT) -> resume complete. Stopping chain."; exit 0
 fi
+# No-op guard: if the latest checkpoint is already at/past TARGET_STEPS this
+# resume would train zero steps. Refuse and do NOT submit a successor, otherwise
+# the singleton chain spins, respawning identical no-op jobs until CHAIN_REMAINING
+# is exhausted (the original failure). CUR_STEP = highest step=*.pt (lower bound
+# on the true resume point in last.pt, so this is conservative).
+CUR_STEP=0
+if compgen -G "$CKPT_DIR/step=*.pt" >/dev/null 2>&1; then
+    CUR_STEP=$(ls -1 "$CKPT_DIR"/step=*.pt | sed -E 's#.*step=0*([0-9]+)\.pt$#\1#' | sort -n | tail -1)
+fi
+if [[ "$CUR_STEP" -ge "$TARGET_STEPS" ]]; then
+    echo "ERROR: latest checkpoint step ($CUR_STEP) >= TARGET_STEPS ($TARGET_STEPS)."
+    echo "       This resume would train zero steps. NOT submitting a successor; chain stops."
+    echo "       Raise TINYGSM_TOTAL_STEPS above $CUR_STEP to actually train further."
+    exit 1
+fi
+echo "Resume guard OK: latest ckpt step=$CUR_STEP < target=$TARGET_STEPS -> work remains."
 if [[ "$CHAIN_REMAINING" -gt 1 ]]; then
     NEXT=$((CHAIN_REMAINING - 1))
     sbatch --dependency=singleton \
