@@ -85,6 +85,18 @@ def main():
         with open(saved_cfg_path, "r") as f:
             saved_cfg_dict = json.load(f)
         _update_cfg_from_dict(cfg, saved_cfg_dict)
+        # The saved snapshot is authoritative for architecture/data, but the
+        # merge above also clobbers env-derived knobs that the Python config had
+        # just read (e.g. cfg.optim.total_steps from TINYGSM_TOTAL_STEPS). A
+        # resume legitimately wants to *extend* training, so re-apply the small
+        # allowlist of resume-tunable env overrides AFTER the merge. Without
+        # this, TINYGSM_TOTAL_STEPS=500000 is silently discarded and a run
+        # already at the saved total_steps stops on its first batch.
+        if "TINYGSM_TOTAL_STEPS" in os.environ:
+            cfg.optim.total_steps = int(os.environ["TINYGSM_TOTAL_STEPS"])
+            if rank == 0:
+                print(f"  ↳ resume override: optim.total_steps = {cfg.optim.total_steps} "
+                      f"(from env TINYGSM_TOTAL_STEPS)")
         if rank == 0:
             print(f"✓ Resuming experiment '{cfg.experiment}' using saved config.")
     elif rank == 0:
