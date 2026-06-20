@@ -19,7 +19,9 @@ import torch
 from models import create_model
 from utils.ema import EMA
 from diffusion.continuous.processes import ContinuousForwardProcess
-from diffusion.continuous.samplers import HeunSampler, DDIMSampler
+from diffusion.continuous.samplers import (
+    HeunSampler, DDIMSampler, EulerMaruyamaSampler, PredictorCorrectorSampler,
+)
 
 
 def load_config(config_path: str):
@@ -71,13 +73,20 @@ def _clean_state_dict(sd: dict) -> dict:
 
 
 def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = True,
-                           sampler_kind: str = "ddim"):
+                           sampler_kind: str = "ddim",
+                           lambda_zero: float = 0.0,
+                           lambda_profile: str = "entropy_rate",
+                           lambda_normalize: str = "as_saved",
+                           guidance_mode: str = "predictor_only"):
     """Return (model, sampler). Applies EMA shadow weights if present.
 
     sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
     headline path (EDM-style stochastic churn on the entropy-rate sigma grid),
     matching evaluation.generation_driver.create_sampler. 'heun' is available
-    for a 2nd-order ablation.
+    for a 2nd-order ablation. 'em' -> EulerMaruyamaSampler, the explicit
+    entropy-gated reverse-SDE sampler whose stochasticity is owned by a
+    LambdaProfile (lambda_zero / lambda_profile / lambda_normalize); it refuses
+    EDM churn and reduces to deterministic DDIM at lambda_zero=0.
     """
     model = create_model(cfg).to(device).eval()
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -99,6 +108,21 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
         sampler = DDIMSampler(model, proc, cfg)
     elif kind in {"heun", "karras"}:
         sampler = HeunSampler(model, proc, cfg)
+    elif kind in {"em", "euler_maruyama"}:
+        sampler = EulerMaruyamaSampler(
+            model, proc, cfg,
+            lambda_profile_name=str(lambda_profile),
+            lambda_zero=float(lambda_zero),
+            lambda_profile_normalize=str(lambda_normalize),
+        )
+    elif kind in {"pc", "predictor_corrector"}:
+        sampler = PredictorCorrectorSampler(
+            model, proc, cfg,
+            lambda_profile_name=str(lambda_profile),
+            lambda_zero=float(lambda_zero),
+            lambda_profile_normalize=str(lambda_normalize),
+            guidance_mode=str(guidance_mode),
+        )
     else:
         raise ValueError(f"unknown sampler_kind={sampler_kind!r}")
     print(f"[task_eval] sampler = {sampler.__class__.__name__}")

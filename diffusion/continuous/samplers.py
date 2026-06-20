@@ -1505,6 +1505,25 @@ class DDIMSampler:
       - continuous binary and continuous one-hot token support
     """
 
+    def _integrate_step(
+        self,
+        x_state: torch.Tensor,
+        h: torch.Tensor,
+        d_cur: torch.Tensor,
+        *,
+        sigma_cur: torch.Tensor,
+        sigma_next: torch.Tensor,
+        prefix_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """First-order probability-flow (DDIM/Euler) update: x_{i+1} = x_i + h·d_i.
+
+        Factored out so reverse-SDE subclasses (EulerMaruyamaSampler) can inject
+        a LambdaProfile-gated Langevin term WITHOUT touching the shared
+        denoise/SC/CFG machinery in `sample`. Base implementation is
+        behavior-preserving (guarded by the DDIM regression / Gate 0).
+        """
+        return x_state + h * d_cur
+
     def __init__(self, model, forward_process, cfg):
         self.model = model
         self.process = forward_process
@@ -1697,7 +1716,10 @@ class DDIMSampler:
                 d_cur = -sigma_state * score_cur
                 _zero_mask_(d_cur, prefix_mask)
 
-                x = x_state + h * d_cur
+                x = self._integrate_step(
+                    x_state, h, d_cur,
+                    sigma_cur=sigma_state, sigma_next=sigma_next, prefix_mask=prefix_mask,
+                )
                 if cond_enabled:
                     _clamp_mask_(x, prefix_full, prefix_mask)
 
@@ -1766,7 +1788,10 @@ class DDIMSampler:
                 d_cur = -sigma_state * score_cur
                 _zero_mask_(d_cur, prefix_mask)
 
-                x = x_state + h * d_cur
+                x = self._integrate_step(
+                    x_state, h, d_cur,
+                    sigma_cur=sigma_state, sigma_next=sigma_next, prefix_mask=prefix_mask,
+                )
                 if cond_enabled:
                     _clamp_mask_(x, prefix_full, prefix_mask)
 
@@ -1953,3 +1978,317 @@ class DDIMSampler:
 
         # Binary branch unchanged: return the final continuous state.
         return x
+
+class EulerMaruyamaSampler(DDIMSampler):
+    """Explicit entropy-gated reverse-SDE sampler (Euler-Maruyama).
+
+    Reverse SDE (see docs/EM_PC_SAMPLER_PLAN.md and the entropy-gated-SDE note):
+        dx = (1 + lambda(sigma)) * sigma * s_theta dr + sqrt(2 lambda sigma) dW_r
+    Discretized (codebase h/d convention, h = sigma_next - sigma_cur < 0,
+    d = -sigma * score, Delta = sigma_cur - sigma_next > 0):
+        x_det = x + h * (1 + lambda) * d
+        x_new = x_det + sqrt(2 * lambda * sigma_cur * Delta) * z,  z ~ N(0, I)
+
+    Reuses DDIMSampler's denoise / self-conditioning / CFG / prefix-clamp
+    machinery verbatim and overrides ONLY the per-step integrator. Stochasticity
+    is owned entirely by the LambdaProfile; EDM-style churn is refused. With
+    lambda_zero == 0 the integrator returns x + h*d and makes NO randn call, so
+    the sampler is bit-identical to deterministic DDIM (Gate 1).
+    """
+
+    def __init__(
+        self,
+        model,
+        forward_process,
+        cfg,
+        *,
+        lambda_profile_name: str = "entropy_rate",
+        lambda_zero: float = 0.0,
+        lambda_profile_normalize: str = "peak",
+    ):
+        super().__init__(model, forward_process, cfg)
+        if float(lambda_zero) < 0.0:
+            raise ValueError(f"lambda_zero must be >= 0, got {lambda_zero}")
+        self.lambda_profile_name = str(lambda_profile_name)
+        self.lambda_zero = float(lambda_zero)
+        self.lambda_profile_normalize = str(lambda_profile_normalize)
+        self._current_profile = None
+
+    def _build_profile(self, entropy_run_dir):
+        from diffusion.continuous.lambda_profiles import (
+            FlatLambdaProfile,
+            make_lambda_profile,
+        )
+        name = self.lambda_profile_name.lower().strip()
+        if self.lambda_zero <= 0.0 or name in {"flat", "constant"}:
+            return FlatLambdaProfile(lambda_zero=self.lambda_zero)
+        if entropy_run_dir is None:
+            entropy_run_dir = self.sigmas._default_entropy_run_dir()
+        return make_lambda_profile(
+            self.lambda_profile_name,
+            lambda_zero=self.lambda_zero,
+            entropy_run_dir=entropy_run_dir,
+            device=self.device,
+            normalize=self.lambda_profile_normalize,
+        )
+
+    def _integrate_step(
+        self,
+        x_state,
+        h,
+        d_cur,
+        *,
+        sigma_cur,
+        sigma_next,
+        prefix_mask,
+    ):
+        # Determinism gate: no profile eval, no randn -> identical to DDIM PF step.
+        if self.lambda_zero == 0.0:
+            return x_state + h * d_cur
+        lam = self._current_profile.evaluate(sigma_cur, state=x_state)
+        x_det = x_state + h * (1.0 + lam) * d_cur
+        delta_i = (sigma_cur - sigma_next).clamp_min(0.0)
+        z = torch.randn_like(x_state)
+        if prefix_mask is not None:
+            _zero_mask_(z, prefix_mask)
+        sigma_noise = (2.0 * lam * sigma_cur * delta_i).clamp_min(0.0).sqrt()
+        return x_det + sigma_noise * z
+
+    @torch.no_grad()
+    def sample(self, *args, entropy_run_dir=None, **kwargs):
+        st = getattr(getattr(self.cfg, "evaluation", object()), "stochastic", None)
+        if st is not None and bool(getattr(st, "enabled", False)) and float(getattr(st, "s_churn", 0.0)) > 0.0:
+            raise RuntimeError(
+                "EulerMaruyamaSampler does not support EDM-style churn. "
+                "Set cfg.evaluation.stochastic.enabled=False / s_churn=0; "
+                "stochasticity is controlled by lambda_zero / the LambdaProfile."
+            )
+        self._current_profile = self._build_profile(entropy_run_dir)
+        try:
+            return super().sample(*args, entropy_run_dir=entropy_run_dir, **kwargs)
+        finally:
+            self._current_profile = None
+
+
+class PredictorCorrectorSampler(DDIMSampler):
+    """PF-ODE predictor + LambdaProfile-gated Langevin corrector (entropy-gated SDE).
+
+    Per step sigma_i -> sigma_{i+1} (h = sigma_next - sigma_cur < 0,
+    Delta = sigma_cur - sigma_next > 0):
+
+      Predictor (PF-ODE Euler at sigma_i, guided score with weight w):
+        score_p = (D_pred - x)/sigma_i^2 ; x_tilde = x + h*(-sigma_i*score_p)
+      Corrector (Langevin at sigma_{i+1}, gated by lambda):
+        eta = lambda * sigma_{i+1} * Delta
+        x_new = x_tilde + eta*score_c + sqrt(2*eta)*z
+
+    Guidance modes (constructor `guidance_mode`):
+      - 'predictor_only' (default, the entropy-gated-SDE-correct CFG): the
+        PREDICTOR uses the guided score s_u + w(s_c - s_u); the CORRECTOR uses
+        the plain CONDITIONAL score (w_corr = 1.0). This removes the (1+lambda)
+        amplification of the guidance term that naive guide-everywhere CFG
+        suffers under stochastic sampling, while keeping guidance on transport.
+      - 'all': both predictor and corrector use the guided score (naive CFG).
+
+    Asymmetry only engages when w > 1 (actual guidance); for w in {0,1} both
+    calls coincide. Stochasticity is owned by the LambdaProfile; EDM churn is
+    refused. lambda_zero=0 => corrector adds nothing (no randn) => deterministic
+    PF predictor (NOT bit-identical to DDIM when self-conditioning is on, since
+    PC carries the corrector's sigma_next estimate as SC).
+    """
+
+    def __init__(
+        self,
+        model,
+        forward_process,
+        cfg,
+        *,
+        lambda_profile_name: str = "entropy_rate",
+        lambda_zero: float = 0.0,
+        lambda_profile_normalize: str = "peak",
+        corrector_step_rule: str = "em_match",
+        guidance_mode: str = "predictor_only",
+    ):
+        super().__init__(model, forward_process, cfg)
+        if float(lambda_zero) < 0.0:
+            raise ValueError(f"lambda_zero must be >= 0, got {lambda_zero}")
+        if corrector_step_rule not in ("em_match", "sigma_cur"):
+            raise ValueError(f"corrector_step_rule must be em_match|sigma_cur, got {corrector_step_rule!r}")
+        if guidance_mode not in ("predictor_only", "all"):
+            raise ValueError(f"guidance_mode must be predictor_only|all, got {guidance_mode!r}")
+        self.lambda_profile_name = str(lambda_profile_name)
+        self.lambda_zero = float(lambda_zero)
+        self.lambda_profile_normalize = str(lambda_profile_normalize)
+        self.corrector_step_rule = str(corrector_step_rule)
+        self.guidance_mode = str(guidance_mode)
+        self._current_profile = None
+
+    def _build_profile(self, entropy_run_dir):
+        from diffusion.continuous.lambda_profiles import FlatLambdaProfile, make_lambda_profile
+        name = self.lambda_profile_name.lower().strip()
+        if self.lambda_zero <= 0.0 or name in {"flat", "constant"}:
+            return FlatLambdaProfile(lambda_zero=self.lambda_zero)
+        if entropy_run_dir is None:
+            entropy_run_dir = self.sigmas._default_entropy_run_dir()
+        return make_lambda_profile(
+            self.lambda_profile_name, lambda_zero=self.lambda_zero,
+            entropy_run_dir=entropy_run_dir, device=self.device,
+            normalize=self.lambda_profile_normalize,
+        )
+
+    def _denoise_probs(self, x_state, sigma_eval, sc_cond, *, prefix_full, prefix_mask,
+                       null_full, cond_enabled, guidance_scale, B):
+        """Faithful copy of DDIMSampler's per-step denoise. Returns (probs_used, sc_carry).
+        cfg path (cond & w>0): sc_cond is a (c,u) tuple, returns (probs_g, (probs_c,probs_u)).
+        non-cfg path:          sc_cond is a single tensor,  returns (probs, probs).
+        """
+        use_cfg = bool(cond_enabled and (guidance_scale > 0.0))
+        if use_cfg:
+            x_cat = torch.cat([x_state, x_state], dim=0)
+            sig_cat = sigma_eval.expand(2 * B)
+            _clamp_mask_(x_cat[:B], prefix_full, prefix_mask)
+            _clamp_mask_(x_cat[B:], null_full, prefix_mask)
+            if self.sc_enabled:
+                cond_cat = torch.cat([sc_cond[0], sc_cond[1]], dim=0)
+                _clamp_mask_(cond_cat[:B], prefix_full, prefix_mask)
+                _clamp_mask_(cond_cat[B:], null_full, prefix_mask)
+            else:
+                cond_cat = torch.zeros_like(x_cat)
+            logits_cat = _model_logits_continuous(self.model, self.cfg, x_cat, sig_cat, cond_cat)
+            probs_c = logits_to_x0_hat(logits_cat[:B], dtype=x_state.dtype, is_cont_tokens=self.is_cont_tokens)
+            probs_u = logits_to_x0_hat(logits_cat[B:], dtype=x_state.dtype, is_cont_tokens=self.is_cont_tokens)
+            _clamp_mask_(probs_c, prefix_full, prefix_mask)
+            _clamp_mask_(probs_u, null_full, prefix_mask)
+            probs_g = probs_u + guidance_scale * (probs_c - probs_u)
+            _clamp_mask_(probs_g, prefix_full, prefix_mask)
+            return probs_g, (probs_c, probs_u)
+        else:
+            sig_B = sigma_eval.expand(B)
+            cond_in = sc_cond if self.sc_enabled else torch.zeros_like(x_state)
+            if cond_enabled:
+                _clamp_mask_(x_state, prefix_full, prefix_mask)
+                if self.sc_enabled:
+                    _clamp_mask_(cond_in, prefix_full, prefix_mask)
+            logits = _model_logits_continuous(self.model, self.cfg, x_state, sig_B, cond_in)
+            probs = logits_to_x0_hat(logits, dtype=x_state.dtype, is_cont_tokens=self.is_cont_tokens)
+            if cond_enabled:
+                _clamp_mask_(probs, prefix_full, prefix_mask)
+            return probs, probs
+
+    @torch.no_grad()
+    def sample(self, num_samples, seq_len, *, conditioning_prefix_full=None,
+               cond_prefix_mask=None, conditioning_prefix=None, cond_len_bits=None,
+               guidance_scale=None, schedule=None, num_steps=None, entropic_blend_alpha=None,
+               entropy_run_dir=None, sigma_min_override=None, sigma_max_override=None,
+               sc_refresh_mode="refined", ati_eta=None, return_probs=False, progress=True):
+        st = getattr(getattr(self.cfg, "evaluation", object()), "stochastic", None)
+        if st is not None and bool(getattr(st, "enabled", False)) and float(getattr(st, "s_churn", 0.0)) > 0.0:
+            raise RuntimeError("PredictorCorrectorSampler refuses EDM churn; set stochastic.enabled=False / s_churn=0. Use lambda_zero.")
+        sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
+        ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
+        B, S = int(num_samples), int(seq_len)
+        self._current_profile = self._build_profile(entropy_run_dir)
+        try:
+            sigmas = self.sigmas.prepare(schedule=schedule, num_steps=num_steps,
+                entropic_blend_alpha=entropic_blend_alpha, entropy_run_dir=entropy_run_dir,
+                sigma_min_override=sigma_min_override, sigma_max_override=sigma_max_override)
+            sigma0 = sigmas[0]
+            cond_enabled, prefix_full, prefix_mask, null_full = _build_mask_conditioning(
+                cfg=self.cfg, B=B, S=S, device=self.device,
+                conditioning_prefix_full=conditioning_prefix_full, cond_prefix_mask=cond_prefix_mask,
+                conditioning_prefix=conditioning_prefix, cond_len_bits=cond_len_bits,
+                is_cont_tokens=self.is_cont_tokens, vocab_size=self.vocab_size)
+            if guidance_scale is None:
+                guidance_scale = float(getattr(getattr(self.cfg, "evaluation", object()), "guidance_scale", 0.0))
+            w = float(guidance_scale)
+            w_pred = w
+            # corrector uses conditional (w=1) under predictor_only when guidance is active (w>1)
+            w_corr = 1.0 if (self.guidance_mode == "predictor_only" and w > 1.0) else w
+            use_cfg = bool(cond_enabled and (w_pred > 0.0))
+
+            if self.is_cont_tokens:
+                x = torch.randn(B, S, self.vocab_size, device=self.device, dtype=torch.float32) * sigma0
+            else:
+                x = torch.randn(B, S, device=self.device, dtype=torch.float32) * sigma0
+            x = x + self.data_center
+            if cond_enabled:
+                _clamp_mask_(x, prefix_full, prefix_mask)
+
+            # init SC state matching the predictor's cfg mode
+            if self.sc_enabled:
+                if use_cfg:
+                    sc_state = (torch.zeros_like(x), torch.zeros_like(x))
+                    _clamp_mask_(sc_state[0], prefix_full, prefix_mask)
+                    _clamp_mask_(sc_state[1], null_full, prefix_mask)
+                else:
+                    sc_state = torch.zeros_like(x)
+                    if cond_enabled:
+                        _clamp_mask_(sc_state, prefix_full, prefix_mask)
+            else:
+                sc_state = None
+
+            indices = range(len(sigmas) - 1)
+            if progress:
+                indices = tqdm(indices, desc="PC Sampler", leave=False)
+
+            for i in indices:
+                sigma_cur, sigma_next = sigmas[i], sigmas[i + 1]
+                sigma_prev = sigmas[i - 1] if i > 0 else None
+                if cond_enabled:
+                    _clamp_mask_(x, prefix_full, prefix_mask)
+                sigma_eval_cur = _ati_shift_sigma_label(sigma_cur, sigma_prev, ati_eta)
+                sigma_eval_next = _ati_shift_sigma_label(sigma_next, sigma_cur, ati_eta)
+                h = sigma_next - sigma_cur
+                delta_i = (sigma_cur - sigma_next).clamp_min(0.0)
+
+                # ---- Predictor (guided) ----
+                probs_p, sc_carry_p = self._denoise_probs(
+                    x, sigma_eval_cur, sc_state, prefix_full=prefix_full, prefix_mask=prefix_mask,
+                    null_full=null_full, cond_enabled=cond_enabled, guidance_scale=w_pred, B=B)
+                score_p = _score_from_probs(probs_p, x, sigma_cur, is_cont_tokens=self.is_cont_tokens)
+                d_pred = -sigma_cur * score_p
+                _zero_mask_(d_pred, prefix_mask)
+                x_tilde = x + h * d_pred
+                if cond_enabled:
+                    _clamp_mask_(x_tilde, prefix_full, prefix_mask)
+
+                # ---- Corrector (conditional under predictor_only) ----
+                probs_cc, sc_carry_c = self._denoise_probs(
+                    x_tilde, sigma_eval_next, sc_carry_p, prefix_full=prefix_full, prefix_mask=prefix_mask,
+                    null_full=null_full, cond_enabled=cond_enabled, guidance_scale=w_corr, B=B)
+
+                if self.lambda_zero == 0.0:
+                    x = x_tilde
+                else:
+                    score_c = _score_from_probs(probs_cc, x_tilde, sigma_next, is_cont_tokens=self.is_cont_tokens)
+                    _zero_mask_(score_c, prefix_mask)
+                    lam = self._current_profile.evaluate(sigma_next, state=x_tilde)
+                    if self.corrector_step_rule == "em_match":
+                        eta = (lam * sigma_next * delta_i).clamp_min(0.0)
+                    else:
+                        eta = (lam * sigma_cur * delta_i).clamp_min(0.0)
+                    z = torch.randn_like(x_tilde)
+                    _zero_mask_(z, prefix_mask)
+                    x = x_tilde + eta * score_c + (2.0 * eta).clamp_min(0.0).sqrt() * z
+                if cond_enabled:
+                    _clamp_mask_(x, prefix_full, prefix_mask)
+
+                # ---- SC carry across steps ----
+                if self.sc_enabled:
+                    if sc_refresh_mode == "refined":
+                        _, sc_state = self._denoise_probs(
+                            x, sigma_eval_next, sc_carry_c, prefix_full=prefix_full, prefix_mask=prefix_mask,
+                            null_full=null_full, cond_enabled=cond_enabled, guidance_scale=w_corr, B=B)
+                    else:
+                        sc_state = sc_carry_c
+
+            # ---- final denoised probs (binary return_probs contract) ----
+            if return_probs:
+                sigma_final = _ati_shift_sigma_label(sigmas[-1], sigmas[-2] if len(sigmas) > 1 else None, ati_eta)
+                probs_final, _ = self._denoise_probs(
+                    x, sigma_final, sc_state, prefix_full=prefix_full, prefix_mask=prefix_mask,
+                    null_full=null_full, cond_enabled=cond_enabled, guidance_scale=w_pred, B=B)
+                return x, probs_final
+            return x
+        finally:
+            self._current_profile = None

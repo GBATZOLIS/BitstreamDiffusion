@@ -55,8 +55,11 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--sampler", default="stochastic", choices=["stochastic", "deterministic"],
                     help="stochastic => EDM-style churn (needs gamma>0); deterministic => no churn")
-    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun"],
-                    help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
+    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun", "em", "pc"],
+                    help="ddim = CoBit ddim_entropic headline path (EDM churn, capped at gamma<=sqrt(2)-1); "
+                         "heun = 2nd-order ablation; em = Euler-Maruyama entropy-gated reverse SDE "
+                         "(stochasticity via lambda_zero, NO churn cap -> exceed the EDM ceiling); "
+                         "pc = predictor-corrector entropy-gated SDE.")
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"])
     ap.add_argument("--gamma", type=float, default=0.0)
     ap.add_argument("--guidance_scale", type=float, default=0.0,
@@ -74,6 +77,16 @@ def main():
                          "Default: config value (0.5). The value the model was TRAINED "
                          "with is the SigmaDataEstimator estimate (~0.40); pass it here "
                          "to test train/eval-matched preconditioning.")
+    ap.add_argument("--lambda_zero", type=float, default=0.0,
+                    help="EM/PC entropy-gated SDE Langevin strength lambda_0 (>=0). 0 => deterministic "
+                         "(EM bit-identical to DDIM det). With lambda_normalize=as_saved, lambda_0 is the "
+                         "EDM-equivalent cumulative churn S_churn=gamma*(NFE-1); the EDM cap gamma<=sqrt(2)-1 "
+                         "corresponds to lambda_0<=0.4142*(NFE-1) -- EM can go ABOVE this.")
+    ap.add_argument("--lambda_profile", default="entropy_rate", choices=["entropy_rate", "flat"])
+    ap.add_argument("--lambda_normalize", default="as_saved", choices=["as_saved", "peak"],
+                    help="as_saved: lambda_0 = S_churn anchor (use for EDM-equivalence + above-cap sweeps).")
+    ap.add_argument("--guidance_mode", default="predictor_only", choices=["predictor_only", "all"],
+                    help="PC only: predictor_only guides PF predictor, corrector uses conditional score.")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
@@ -91,7 +104,9 @@ def main():
     sigma_data_used, _ = resolve_sigma_data(cfg, run_dir, args.sigma_data)
 
     model, sampler = load_model_and_sampler(
-        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)
+        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind,
+        lambda_zero=args.lambda_zero, lambda_profile=args.lambda_profile,
+        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
@@ -154,6 +169,11 @@ def main():
         "sampler": args.sampler,
         "gamma": args.gamma,
         "guidance_scale": args.guidance_scale,
+        "sampler_kind": args.sampler_kind,
+        "lambda_zero": args.lambda_zero,
+        "lambda_profile": args.lambda_profile,
+        "lambda_normalize": args.lambda_normalize,
+        "guidance_mode": args.guidance_mode,
         "steps": steps,
         "sigma_data": sigma_data_used,
         "num_examples": int(n),
@@ -167,6 +187,10 @@ def main():
         "sample_records": records,
     }
     tag = f"{args.sampler}_g{args.gamma}_w{args.guidance_scale}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
+    if args.sampler_kind != "ddim":
+        tag += f"_kind{args.sampler_kind}_lz{args.lambda_zero:g}_{args.lambda_normalize}"
+        if args.sampler_kind == "pc":
+            tag += f"_{args.guidance_mode}"
     out_path = out_dir / f"gsm8k_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== GSM8K RESULT ===")

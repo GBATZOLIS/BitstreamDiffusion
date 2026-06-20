@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--difficulty", default=None, help="override (else from config/env)")
     ap.add_argument("--sampler", default="stochastic", choices=["stochastic", "deterministic"],
                     help="stochastic => EDM-style churn (needs gamma>0); deterministic => no churn")
-    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun"],
+    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun", "em", "pc"],
                     help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"],
                     help="sigma grid; entropic = trained entropy-rate schedule")
@@ -98,6 +98,22 @@ def main():
                          "with is the SigmaDataEstimator estimate (see training log: "
                          "'sigma_data estimated: ...'); pass it here to test "
                          "train/eval-matched preconditioning.")
+    ap.add_argument("--guidance_scale", type=float, default=0.0,
+                    help="Classifier-free guidance scale w. 0 => no guidance (conditional). "
+                         "probs_g = probs_u + w*(probs_c - probs_u), where probs_u uses the "
+                         "cfg.cond.null_strategy null prefix. Requires a model trained with "
+                         "p_uncond>0; otherwise the unconditional path is untrained.")
+    ap.add_argument("--lambda_zero", type=float, default=0.0,
+                    help="EM/PC entropy-gated SDE: Langevin strength lambda_0 (>=0). "
+                         "0 => deterministic (bit-identical to DDIM det). Only used by --sampler_kind em.")
+    ap.add_argument("--lambda_profile", default="entropy_rate", choices=["entropy_rate", "flat"],
+                    help="EM/PC lambda(sigma) profile shape.")
+    ap.add_argument("--lambda_normalize", default="as_saved", choices=["as_saved", "peak"],
+                    help="EM/PC lambda table normalization: 'as_saved' (lambda_0=S_churn anchor) or 'peak'.")
+    ap.add_argument("--guidance_mode", default="predictor_only", choices=["predictor_only", "all"],
+                    help="PC only: 'predictor_only' guides the PF predictor and runs the Langevin "
+                         "corrector at the conditional score (entropy-gated-SDE-correct CFG); "
+                         "'all' guides both (naive CFG).")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
@@ -115,7 +131,9 @@ def main():
     sigma_data_used, _ = resolve_sigma_data(cfg, run_dir, args.sigma_data)
 
     model, sampler = load_model_and_sampler(
-        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind)
+        cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind,
+        lambda_zero=args.lambda_zero, lambda_profile=args.lambda_profile,
+        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
@@ -142,6 +160,7 @@ def main():
             cfg, sampler, prefix_full=x0, prefix_mask=pm, num_steps=steps,
             schedule=schedule, entropy_run_dir=str(run_dir),
             sigma_min_override=args.sigma_min, seed=args.seed,
+            guidance_scale=args.guidance_scale,
         )
         gen_ids = bits_to_token_ids(bits, bpt)                                   # [B,180]
 
@@ -185,6 +204,12 @@ def main():
         "gamma": args.gamma,
         "ema": bool(args.ema),
         "steps": steps,
+        "guidance_scale": args.guidance_scale,
+        "sampler_kind": args.sampler_kind,
+        "lambda_zero": args.lambda_zero,
+        "lambda_profile": args.lambda_profile,
+        "lambda_normalize": args.lambda_normalize,
+        "guidance_mode": args.guidance_mode,
         "sigma_data": sigma_data_used,
         "num_examples": n,
         "exact_match_accuracy": n_exact / max(1, n),
@@ -195,7 +220,11 @@ def main():
         "invalid_token_rate": n_invalid_tok / max(1, n_sol_tokens),
         "sample_records": records,
     }
-    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
+    tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_w{args.guidance_scale:g}_ema{int(bool(args.ema))}"
+    if args.sampler_kind != "ddim":
+        tag += f"_kind{args.sampler_kind}_lz{args.lambda_zero:g}_{args.lambda_normalize}"
+        if args.sampler_kind == "pc":
+            tag += f"_{args.guidance_mode}"
     out_path = out_dir / f"sudoku_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== SUDOKU RESULT ===")
