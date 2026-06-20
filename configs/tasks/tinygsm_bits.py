@@ -183,7 +183,9 @@ def get_config():
     cfg.optim.eps = 1e-8
     cfg.optim.grad_clip = 1.0
     cfg.optim.scheduler = "constant"
-    cfg.optim.total_steps = 250_000
+    # Default 250k; override at resume time to train further
+    # (e.g. TINYGSM_TOTAL_STEPS=500000). The cfg-guidance config inherits this.
+    cfg.optim.total_steps = int(os.environ.get("TINYGSM_TOTAL_STEPS", 250_000))
     cfg.optim.warmup = 2_500
 
     # --------------------------------------------------------- evaluation

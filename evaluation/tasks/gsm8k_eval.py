@@ -59,6 +59,9 @@ def main():
                     help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"])
     ap.add_argument("--gamma", type=float, default=0.0)
+    ap.add_argument("--guidance_scale", type=float, default=0.0,
+                    help="Classifier-free guidance weight w (probs_u + w*(probs_c-probs_u)). "
+                         "0 => no guidance. Requires a checkpoint trained with cond dropout.")
     ap.add_argument("--ema", type=int, default=1, help="1=EMA weights (headline), 0=raw weights")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=64)
@@ -113,6 +116,7 @@ def main():
             cfg, sampler, prefix_full=x0, prefix_mask=pm, num_steps=steps,
             schedule=schedule, entropy_run_dir=str(run_dir),
             sigma_min_override=args.sigma_min, seed=args.seed,
+            guidance_scale=args.guidance_scale,
         )
         gen_ids = bits_to_token_ids(bits, bpt)  # [B,512]
 
@@ -149,6 +153,7 @@ def main():
         "checkpoint": str(args.checkpoint),
         "sampler": args.sampler,
         "gamma": args.gamma,
+        "guidance_scale": args.guidance_scale,
         "steps": steps,
         "sigma_data": sigma_data_used,
         "num_examples": int(n),
@@ -161,7 +166,7 @@ def main():
         "timeout_s": timeout_s,
         "sample_records": records,
     }
-    tag = f"{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
+    tag = f"{args.sampler}_g{args.gamma}_w{args.guidance_scale}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
     out_path = out_dir / f"gsm8k_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== GSM8K RESULT ===")

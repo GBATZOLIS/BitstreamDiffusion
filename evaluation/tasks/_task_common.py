@@ -147,8 +147,14 @@ def sample_bits(
     entropy_run_dir: Optional[str] = None,
     sigma_min_override: Optional[float] = None,
     seed: Optional[int] = None,
+    guidance_scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """Run conditional sampling and return decoded bits [B, S] (long, 0/1)."""
+    """Run conditional sampling and return decoded bits [B, S] (long, 0/1).
+
+    guidance_scale: classifier-free guidance weight w (probs = probs_u +
+    w*(probs_c - probs_u)). None/0 => no guidance (plain conditional path).
+    Requires a checkpoint trained with conditioning dropout (cfg.cond.p_uncond>0).
+    """
     if seed is not None:
         torch.manual_seed(int(seed))
         torch.cuda.manual_seed_all(int(seed))
@@ -168,6 +174,7 @@ def sample_bits(
             schedule=schedule,
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
+            guidance_scale=guidance_scale,
             sc_refresh_mode="carry",
             ati_eta=0.0,
             return_probs=True,
