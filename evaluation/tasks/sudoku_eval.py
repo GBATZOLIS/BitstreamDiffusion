@@ -114,13 +114,31 @@ def main():
                     help="PC only: 'predictor_only' guides the PF predictor and runs the Langevin "
                          "corrector at the conditional score (entropy-gated-SDE-correct CFG); "
                          "'all' guides both (naive CFG).")
+    ap.add_argument("--em_step_gamma_cap", type=float, default=None,
+                    help="EM only: per-step churn cap gamma_step=lam*Delta/sigma (bounds injected "
+                         "noise to <= sqrt(2*cap)*sigma). Unset = sampler default 1.0; RECOMMENDED 0.41 "
+                         "(~sqrt(2)-1). See reports/EM_TINYGSM_COLLAPSE_ANALYSIS.md.")
     ap.add_argument("--out_dir", default=None)
+    ap.add_argument("--allow_cpu", action="store_true",
+                    help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
+                         "because a silent CPU fallback (e.g. CUDA failing to init on a bad node) "
+                         "runs far slower and silently invalidates results. Set SUDOKU_ALLOW_CPU=1 "
+                         "for the same effect.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     if args.difficulty:
         cfg.data.difficulty = args.difficulty
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 180))
+    # Guard against a silent CPU fallback when CUDA fails to init on a bad node.
+    allow_cpu = bool(args.allow_cpu) or os.environ.get("SUDOKU_ALLOW_CPU", "") not in ("", "0")
+    if not torch.cuda.is_available() and not allow_cpu:
+        raise RuntimeError(
+            "CUDA is not available — refusing to run the Sudoku eval on CPU.\n"
+            "A silent CPU fallback (CUDA failing to init on a bad node) runs far slower "
+            "and silently invalidates results. If this is intentional, pass --allow_cpu "
+            "(or set SUDOKU_ALLOW_CPU=1)."
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     run_dir = Path(args.checkpoint).resolve().parent.parent
@@ -133,7 +151,8 @@ def main():
     model, sampler = load_model_and_sampler(
         cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind,
         lambda_zero=args.lambda_zero, lambda_profile=args.lambda_profile,
-        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode)
+        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode,
+        em_step_gamma_cap=args.em_step_gamma_cap)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 

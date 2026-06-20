@@ -77,7 +77,8 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
                            lambda_zero: float = 0.0,
                            lambda_profile: str = "entropy_rate",
                            lambda_normalize: str = "as_saved",
-                           guidance_mode: str = "predictor_only"):
+                           guidance_mode: str = "predictor_only",
+                           em_step_gamma_cap=None):
     """Return (model, sampler). Applies EMA shadow weights if present.
 
     sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
@@ -109,11 +110,18 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
     elif kind in {"heun", "karras"}:
         sampler = HeunSampler(model, proc, cfg)
     elif kind in {"em", "euler_maruyama"}:
+        # em_step_gamma_cap=None -> use EulerMaruyamaSampler's own default (1.0).
+        # The per-step churn cap bounds injected noise to <= sqrt(2*cap)*sigma; EDM's
+        # own stability bound is gamma<=sqrt(2)-1~=0.41. See reports/EM_TINYGSM_COLLAPSE_ANALYSIS.md.
+        em_kwargs = {}
+        if em_step_gamma_cap is not None:
+            em_kwargs["em_step_gamma_cap"] = float(em_step_gamma_cap)
         sampler = EulerMaruyamaSampler(
             model, proc, cfg,
             lambda_profile_name=str(lambda_profile),
             lambda_zero=float(lambda_zero),
             lambda_profile_normalize=str(lambda_normalize),
+            **em_kwargs,
         )
     elif kind in {"pc", "predictor_corrector"}:
         sampler = PredictorCorrectorSampler(

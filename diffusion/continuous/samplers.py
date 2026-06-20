@@ -2005,6 +2005,7 @@ class EulerMaruyamaSampler(DDIMSampler):
         lambda_profile_name: str = "entropy_rate",
         lambda_zero: float = 0.0,
         lambda_profile_normalize: str = "peak",
+        em_step_gamma_cap: Optional[float] = 1.0,
     ):
         super().__init__(model, forward_process, cfg)
         if float(lambda_zero) < 0.0:
@@ -2012,6 +2013,14 @@ class EulerMaruyamaSampler(DDIMSampler):
         self.lambda_profile_name = str(lambda_profile_name)
         self.lambda_zero = float(lambda_zero)
         self.lambda_profile_normalize = str(lambda_profile_normalize)
+        # Per-step stability clamp on the effective churn gamma_step = lam*Delta/sigma.
+        # None disables it (raw, unstable). Default 1.0 bounds the per-step injected
+        # noise to <= sqrt(2)*sigma, which fixes the low-sigma-tail blow-up (where the
+        # entropic inverse-CDF grid is sparse, Delta-sigma >> sigma/(N*p_log), so the
+        # raw sqrt(2*lam*sigma*Delta) injects multiple-sigma kicks on the final
+        # bit-resolving steps) while leaving the bulk (gamma_step=lambda_0/N) untouched
+        # and still allowing above-EDM-cap bulk churn.
+        self.em_step_gamma_cap = None if em_step_gamma_cap is None else float(em_step_gamma_cap)
         self._current_profile = None
 
     def _build_profile(self, entropy_run_dir):
@@ -2046,8 +2055,16 @@ class EulerMaruyamaSampler(DDIMSampler):
         if self.lambda_zero == 0.0:
             return x_state + h * d_cur
         lam = self._current_profile.evaluate(sigma_cur, state=x_state)
-        x_det = x_state + h * (1.0 + lam) * d_cur
         delta_i = (sigma_cur - sigma_next).clamp_min(0.0)
+        # Per-step stability clamp: bound effective churn gamma_step = lam*Delta/sigma
+        # <= em_step_gamma_cap. Applied to BOTH the Langevin drift and the noise so the
+        # step stays a consistent Langevin update. Fixes the low-sigma-tail over-noising
+        # (sparse entropic grid -> huge Delta-sigma -> multi-sigma kicks) without
+        # touching the bulk (gamma_step=lambda_0/N) or capping above-cap bulk churn.
+        if self.em_step_gamma_cap is not None:
+            lam_cap = self.em_step_gamma_cap * sigma_cur / delta_i.clamp_min(1e-12)
+            lam = torch.minimum(lam, lam_cap)
+        x_det = x_state + h * (1.0 + lam) * d_cur
         z = torch.randn_like(x_state)
         if prefix_mask is not None:
             _zero_mask_(z, prefix_mask)

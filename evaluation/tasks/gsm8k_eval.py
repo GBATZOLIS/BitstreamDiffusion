@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -87,13 +88,35 @@ def main():
                     help="as_saved: lambda_0 = S_churn anchor (use for EDM-equivalence + above-cap sweeps).")
     ap.add_argument("--guidance_mode", default="predictor_only", choices=["predictor_only", "all"],
                     help="PC only: predictor_only guides PF predictor, corrector uses conditional score.")
+    ap.add_argument("--em_step_gamma_cap", type=float, default=None,
+                    help="EM only: per-step stability cap on effective churn gamma_step=lam*Delta/sigma. "
+                         "Bounds injected noise to <= sqrt(2*cap)*sigma. Default (unset) = sampler default 1.0 "
+                         "(=> up to sqrt(2)*sigma, too loose). RECOMMENDED 0.41 (~sqrt(2)-1, EDM's own bound): "
+                         "removes the low-sigma tail blow-up while leaving the EDM-equivalent bulk untouched. "
+                         "See reports/EM_TINYGSM_COLLAPSE_ANALYSIS.md.")
     ap.add_argument("--out_dir", default=None)
+    ap.add_argument("--allow_cpu", action="store_true",
+                    help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
+                         "because a silent CPU fallback (e.g. CUDA failing to init on a bad node) "
+                         "runs ~100x slower and silently invalidates throughput/results. Set "
+                         "GSM8K_ALLOW_CPU=1 for the same effect.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 1024))
     timeout_s = float(getattr(getattr(cfg.evaluation, "gsm8k", object()), "timeout_s", 5.0))
     n_boot = int(getattr(getattr(cfg.evaluation, "gsm8k", object()), "bootstrap_size", 10000))
+    # Guard against a silent CPU fallback when CUDA fails to init on a bad node:
+    # such a run would (a) be ~100x slower and (b) silently produce results that
+    # look real. Fail loudly unless CPU was explicitly requested.
+    allow_cpu = bool(args.allow_cpu) or os.environ.get("GSM8K_ALLOW_CPU", "") not in ("", "0")
+    if not torch.cuda.is_available() and not allow_cpu:
+        raise RuntimeError(
+            "CUDA is not available — refusing to run the GSM8K eval on CPU.\n"
+            "A silent CPU fallback (CUDA failing to init on a bad node) runs ~100x slower "
+            "and silently invalidates results. If this is intentional, pass --allow_cpu "
+            "(or set GSM8K_ALLOW_CPU=1)."
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     run_dir = Path(args.checkpoint).resolve().parent.parent
@@ -106,7 +129,8 @@ def main():
     model, sampler = load_model_and_sampler(
         cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind,
         lambda_zero=args.lambda_zero, lambda_profile=args.lambda_profile,
-        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode)
+        lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode,
+        em_step_gamma_cap=args.em_step_gamma_cap)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
@@ -174,6 +198,7 @@ def main():
         "lambda_profile": args.lambda_profile,
         "lambda_normalize": args.lambda_normalize,
         "guidance_mode": args.guidance_mode,
+        "em_step_gamma_cap": args.em_step_gamma_cap,
         "steps": steps,
         "sigma_data": sigma_data_used,
         "num_examples": int(n),
@@ -189,6 +214,8 @@ def main():
     tag = f"{args.sampler}_g{args.gamma}_w{args.guidance_scale}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
     if args.sampler_kind != "ddim":
         tag += f"_kind{args.sampler_kind}_lz{args.lambda_zero:g}_{args.lambda_normalize}"
+        if args.sampler_kind == "em" and args.em_step_gamma_cap is not None:
+            tag += f"_cap{args.em_step_gamma_cap:g}"
         if args.sampler_kind == "pc":
             tag += f"_{args.guidance_mode}"
     out_path = out_dir / f"gsm8k_results_{tag}.json"
