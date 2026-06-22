@@ -167,6 +167,88 @@ def _is_cont_tokens_cfg(cfg) -> bool:
     return str(getattr(cfg.data, "representation", "binary")).lower() == "tokens"
 
 
+def _matched_filter_binary(cfg, x_t: torch.Tensor, sigma: torch.Tensor) -> Optional[torch.Tensor]:
+    """
+    Recompute the binary matched-filter residual mf = scale*(x_t-center)/sigma^2
+    (clipped) as a separate tensor [B,S], matching
+    apply_continuous_logit_postprocessing. Returns None when the model does not
+    use a matched-filter postprocessing mode (then mf is implicitly 0 and the
+    'learned'/'full' token targets coincide).
+    """
+    mode = str(getattr(cfg.model, "continuous_logit_scaling", "none")).lower()
+    if mode == "matched_filter":
+        mode = "matched_filter_residual"
+    if mode not in {"matched_filter_residual", "matched_filter_only"}:
+        return None
+    center = float(
+        getattr(cfg.model, "matched_filter_center",
+                getattr(cfg.diffusion.continuous, "data_center", 0.5))
+    )
+    scale = float(getattr(cfg.model, "matched_filter_scale", 1.0))
+    clip = getattr(cfg.model, "matched_filter_clip", None)
+    sigma2 = sigma.to(torch.float32).square().view(-1, 1).clamp_min(1e-12)
+    mf = scale * (x_t.to(torch.float32) - center) / sigma2
+    if clip is not None:
+        c = float(clip)
+        mf = mf.clamp(-c, c)
+    return mf
+
+
+def _codeword_sharpen(
+    raw_logits: torch.Tensor,
+    mf: Optional[torch.Tensor],
+    *,
+    temp: float,
+    target: str,
+    codebook: torch.Tensor,
+    topk: Optional[int] = None,
+    chunk_rows: int = 4096,
+) -> torch.Tensor:
+    """
+    Joint, valid-codeword temperature decode (the continuous analogue of MDLM/Duo
+    categorical temperature). Per token position with per-bit logits ell:
+        full:    L_T(v) = <C_v, ell_raw + mf> / T
+        learned: L_T(v) = <C_v, ell_raw> / T + <C_v, mf>
+        q_T = softmax over VALID tokens v of L_T(v)
+        D_b = E_{v~q_T}[c_b(v)] = (q_T C)_b          (returned as the x0 bit estimate)
+    Restricting the softmax to the V valid codewords makes invalid codes
+    structurally unreachable, so as T->0 it goes to the joint MAP over valid
+    tokens (true greedy) rather than the per-bit MAP. Processed in row-chunks to
+    bound the [chunk, V] memory spike.
+
+    raw_logits, mf: [B, S] with S = P * m (m = bits/token).
+    codebook: [V, m] float in {0,1}.
+    Returns D in (0,1), shape [B, S].
+    """
+    B, S = raw_logits.shape
+    m = int(codebook.shape[1])
+    if S % m != 0:
+        raise ValueError(f"seq bits {S} not divisible by bits/token {m}")
+    Ct = codebook.to(torch.float32).t().contiguous()          # [m, V]
+    raw = raw_logits.to(torch.float32).reshape(B * S // m, m)  # [N, m]
+    mf_r = mf.to(torch.float32).reshape(B * S // m, m) if mf is not None else None
+    T = float(temp)
+    full = (str(target).lower() == "full")
+    N = raw.shape[0]
+    out = torch.empty_like(raw)
+    for i in range(0, N, chunk_rows):
+        r = raw[i:i + chunk_rows]
+        L = r @ Ct                                            # [n, V] = <C_v, ell_raw>
+        if mf_r is not None:
+            Lm = mf_r[i:i + chunk_rows] @ Ct                  # <C_v, mf>
+            L = (L + Lm) / T if full else L / T + Lm
+        else:
+            L = L / T
+        if topk is not None and topk < Ct.shape[1]:
+            vals, idx = L.topk(int(topk), dim=-1)             # [n, k]
+            q = torch.softmax(vals, dim=-1)
+            out[i:i + chunk_rows] = (q.unsqueeze(-1) * codebook.to(torch.float32)[idx]).sum(-2)
+        else:
+            q = torch.softmax(L, dim=-1)                      # [n, V]
+            out[i:i + chunk_rows] = q @ codebook.to(torch.float32)
+    return out.reshape(B, S)
+
+
 def _model_logits_continuous(
     model,
     cfg,
@@ -176,6 +258,7 @@ def _model_logits_continuous(
     *,
     posterior_temp: float = 1.0,
     posterior_temp_target: Optional[str] = None,
+    pt_ctx: Optional[dict] = None,
 ) -> torch.Tensor:
     """
     Shared cfg-aware helper for continuous models.
@@ -188,14 +271,38 @@ def _model_logits_continuous(
     apply_continuous_logit_postprocessing). Defaults to 1.0 => no change.
     posterior_temp_target: "learned" (default) or "full"; falls back to
     cfg.model.posterior_temp_target then "learned" when None.
+    pt_ctx: optional dict enabling joint valid-codeword (token-space) sharpening.
+      When pt_ctx["space"] == "token" (binary mode only), the per-bit posterior is
+      replaced by the temperature-sharpened expectation over valid codewords and
+      returned as a logit logit(D) so the downstream sigmoid recovers D exactly
+      (the sampler/score path is unchanged). Keys: space, codebook [V,m], topk.
     """
-    logits_raw = model(x_t, sigma, x0_hat)
-
     target = (
         posterior_temp_target
         if posterior_temp_target is not None
         else str(getattr(cfg.model, "posterior_temp_target", "learned"))
     )
+
+    if (
+        pt_ctx is not None
+        and str(pt_ctx.get("space", "bit")).lower() == "token"
+        and not _is_cont_tokens_cfg(cfg)
+    ):
+        raw = canonicalize_continuous_logits(
+            model(x_t, sigma, x0_hat), is_cont_tokens=False
+        )
+        mf = _matched_filter_binary(cfg, x_t, sigma)
+        D = _codeword_sharpen(
+            raw, mf,
+            temp=float(posterior_temp),
+            target=target,
+            codebook=pt_ctx["codebook"],
+            topk=pt_ctx.get("topk"),
+        )
+        D = D.clamp(1e-6, 1.0 - 1e-6)
+        return torch.log(D / (1.0 - D)).to(dtype=raw.dtype)  # logit(D); sigmoid recovers D
+
+    logits_raw = model(x_t, sigma, x0_hat)
 
     return apply_continuous_logit_postprocessing(
         logits_raw,

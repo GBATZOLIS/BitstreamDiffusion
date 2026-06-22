@@ -118,6 +118,85 @@ def test_sigma_ramp_schedule():
     assert mids == sorted(mids)
 
 
+def _full_codebook(m):
+    # all 2^m codes as rows, MSB-first to match token_ids_to_bits
+    V = 2 ** m
+    ids = torch.arange(V)
+    bits = ((ids.unsqueeze(1) >> torch.arange(m - 1, -1, -1)) & 1).float()
+    return bits  # [V, m]
+
+
+def test_codeword_T1_full_codebook_recovers_sigmoid():
+    # With the FULL 2^m codebook and T=1, the valid-codeword expectation E[c_b]
+    # must equal the per-bit marginal sigmoid(ell_b) (independent Bernoullis).
+    from diffusion.continuous.logit_postprocess import _codeword_sharpen
+    m = 4
+    C = _full_codebook(m)
+    raw = torch.randn(2, 3 * m)  # B=2, P=3 tokens
+    for target in ("learned", "full"):
+        D = _codeword_sharpen(raw, None, temp=1.0, target=target, codebook=C)
+        assert torch.allclose(D, torch.sigmoid(raw), atol=1e-5), target
+
+
+def test_codeword_T1_with_mf_full_codebook():
+    from diffusion.continuous.logit_postprocess import _codeword_sharpen
+    m = 4
+    C = _full_codebook(m)
+    raw = torch.randn(2, 2 * m)
+    mf = torch.randn(2, 2 * m)
+    # At T=1 learned and full coincide and equal sigmoid(raw+mf).
+    for target in ("learned", "full"):
+        D = _codeword_sharpen(raw, mf, temp=1.0, target=target, codebook=C)
+        assert torch.allclose(D, torch.sigmoid(raw + mf), atol=1e-5), target
+
+
+def test_codeword_lowT_full_codebook_is_perbit_map():
+    # Full codebook => joint MAP == per-bit MAP, so D -> 1[ell>0].
+    from diffusion.continuous.logit_postprocess import _codeword_sharpen
+    m = 4
+    C = _full_codebook(m)
+    raw = torch.randn(2, 2 * m)
+    D = _codeword_sharpen(raw, None, temp=1e-3, target="learned", codebook=C)
+    assert torch.allclose(D, (raw > 0).float(), atol=1e-3)
+
+
+def test_codeword_restricted_avoids_invalid_corner():
+    # m=2, valid codes {00,01,10} (11 dropped). raw favors both bits=1 (per-bit
+    # MAP = invalid 11). Joint MAP over valid must NOT be [1,1]; the tie 01/10
+    # gives D ~ [0.5, 0.5]. Proves invalid corner is unreachable.
+    from diffusion.continuous.logit_postprocess import _codeword_sharpen
+    C = torch.tensor([[0., 0.], [0., 1.], [1., 0.]])  # drop [1,1]
+    raw = torch.tensor([[8.0, 8.0]])  # both bits strongly want 1
+    D = _codeword_sharpen(raw, None, temp=1e-2, target="learned", codebook=C)
+    assert (D < 0.9).all(), D  # never commits to the invalid 11 corner
+    assert torch.allclose(D, torch.tensor([[0.5, 0.5]]), atol=1e-2)
+
+
+def test_codeword_topk_in_hull():
+    from diffusion.continuous.logit_postprocess import _codeword_sharpen
+    m = 4
+    C = _full_codebook(m)
+    raw = torch.randn(2, 2 * m)
+    D = _codeword_sharpen(raw, None, temp=0.5, target="learned", codebook=C, topk=3)
+    assert bool((D >= -1e-5).all()) and bool((D <= 1 + 1e-5).all())
+
+
+def test_matched_filter_binary_matches_postproc():
+    import types
+    from diffusion.continuous.logit_postprocess import _matched_filter_binary
+    cfg = types.SimpleNamespace(
+        model=types.SimpleNamespace(continuous_logit_scaling="matched_filter_residual",
+                                    matched_filter_center=0.5, matched_filter_scale=1.0,
+                                    matched_filter_clip=30.0),
+        diffusion=types.SimpleNamespace(continuous=types.SimpleNamespace(data_center=0.5)),
+    )
+    x_t = torch.rand(3, 8)
+    sigma = torch.full((3,), 0.4)
+    got = _matched_filter_binary(cfg, x_t, sigma)
+    exp = ((x_t - 0.5) / 0.16).clamp(-30, 30)
+    assert torch.allclose(got, exp, atol=1e-4)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

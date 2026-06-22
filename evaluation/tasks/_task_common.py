@@ -178,6 +178,9 @@ def sample_bits(
     posterior_temp_schedule: str = "const",
     posterior_temp_sigma_lo: float = 0.1,
     posterior_temp_sigma_hi: float = 4.0,
+    posterior_temp_space: str = "bit",
+    codeword_vocab_size: Optional[int] = None,
+    codeword_topk: Optional[int] = None,
 ) -> torch.Tensor:
     """Run conditional sampling and return decoded bits [B, S] (long, 0/1).
 
@@ -222,6 +225,9 @@ def sample_bits(
             posterior_temp_schedule=posterior_temp_schedule,
             posterior_temp_sigma_lo=posterior_temp_sigma_lo,
             posterior_temp_sigma_hi=posterior_temp_sigma_hi,
+            posterior_temp_space=posterior_temp_space,
+            codeword_vocab_size=codeword_vocab_size,
+            codeword_topk=codeword_topk,
         )
     bits = (probs.float() >= 0.5).long()
     return bits

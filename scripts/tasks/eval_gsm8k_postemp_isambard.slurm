@@ -46,6 +46,8 @@ PT_TARGET="${PT_TARGET:-learned}"                      # learned (recommended) |
 PT_SCHEDULE="${PT_SCHEDULE:-const}"                    # const | sigma_ramp
 PT_SIGMA_LO="${PT_SIGMA_LO:-0.1}"
 PT_SIGMA_HI="${PT_SIGMA_HI:-4.0}"
+PT_SPACE="${PT_SPACE:-bit}"                            # bit | token (joint valid-codeword)
+CODEWORD_TOPK="${CODEWORD_TOPK:-}"
 
 STEP9="$(printf '%09d' "$CKPT_STEP")"
 KTAG="$(( CKPT_STEP / 1000 ))k"
@@ -71,7 +73,7 @@ export TMPDIR="/tmp/${USER}/${SLURM_ARRAY_JOB_ID:-0}_${SLURM_ARRAY_TASK_ID:-0}"
 export TORCHINDUCTOR_CACHE_DIR="$TMPDIR/ti" TRITON_CACHE_DIR="$TMPDIR/tr"
 mkdir -p "$TMPDIR" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 
-echo "===== ckpt=$KTAG NFE=$STEPS gamma=$GAMMA T=$T target=$PT_TARGET sched=$PT_SCHEDULE (lo=$PT_SIGMA_LO hi=$PT_SIGMA_HI) limit=$LIMIT (task $TID) ===== $(date +%T)"
+echo "===== ckpt=$KTAG NFE=$STEPS gamma=$GAMMA T=$T target=$PT_TARGET sched=$PT_SCHEDULE space=$PT_SPACE (lo=$PT_SIGMA_LO hi=$PT_SIGMA_HI topk=${CODEWORD_TOPK:-full}) limit=$LIMIT (task $TID) ===== $(date +%T)"
 echo "python: $(which python)"
 python -m evaluation.tasks.gsm8k_eval \
   --config configs/tasks/tinygsm_bits.py \
@@ -81,5 +83,7 @@ python -m evaluation.tasks.gsm8k_eval \
   --posterior_temp "$T" --posterior_temp_target "$PT_TARGET" \
   --posterior_temp_schedule "$PT_SCHEDULE" \
   --posterior_temp_sigma_lo "$PT_SIGMA_LO" --posterior_temp_sigma_hi "$PT_SIGMA_HI" \
+  --posterior_temp_space "$PT_SPACE" \
+  ${CODEWORD_TOPK:+--codeword_topk "$CODEWORD_TOPK"} \
   --out_dir "$OUT_DIR"
 echo "eval done (T=$T gamma=$GAMMA) exit=$? $(date)"

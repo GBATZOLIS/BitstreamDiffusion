@@ -103,6 +103,13 @@ def main():
                     help="sigma_ramp lower edge: at/below this sigma, full temperature T applies.")
     ap.add_argument("--posterior_temp_sigma_hi", type=float, default=4.0,
                     help="sigma_ramp upper edge: at/above this sigma, T=1 (untempered, protects diversity).")
+    ap.add_argument("--posterior_temp_space", default="bit", choices=["bit", "token"],
+                    help="bit: per-bit sigmoid(logit/T) (factorized; collapses below T~0.25). "
+                         "token: sharpen the joint posterior over VALID codewords (MDLM/Duo analogue, "
+                         "no invalid-code cliff). target full=(raw+mf)/T, learned=raw/T+mf.")
+    ap.add_argument("--codeword_topk", type=int, default=None,
+                    help="token space: softmax over only the top-k valid tokens per position (speed/memory). "
+                         "None = full vocab.")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
@@ -154,6 +161,9 @@ def main():
             posterior_temp_schedule=args.posterior_temp_schedule,
             posterior_temp_sigma_lo=args.posterior_temp_sigma_lo,
             posterior_temp_sigma_hi=args.posterior_temp_sigma_hi,
+            posterior_temp_space=args.posterior_temp_space,
+            codeword_vocab_size=tok_len,
+            codeword_topk=args.codeword_topk,
         )
         gen_ids = bits_to_token_ids(bits, bpt)  # [B,512]
 
@@ -201,6 +211,8 @@ def main():
         "posterior_temp_schedule": args.posterior_temp_schedule,
         "posterior_temp_sigma_lo": args.posterior_temp_sigma_lo,
         "posterior_temp_sigma_hi": args.posterior_temp_sigma_hi,
+        "posterior_temp_space": args.posterior_temp_space,
+        "codeword_topk": args.codeword_topk,
         "steps": steps,
         "sigma_data": sigma_data_used,
         "num_examples": int(n),
@@ -214,10 +226,14 @@ def main():
         "sample_records": records,
     }
     tag = f"{args.sampler}_g{args.gamma}_w{args.guidance_scale}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
-    if abs(float(args.posterior_temp) - 1.0) > 1e-8:
+    if abs(float(args.posterior_temp) - 1.0) > 1e-8 or args.posterior_temp_space != "bit":
         tag += f"_pt{args.posterior_temp:g}_{args.posterior_temp_target}_{args.posterior_temp_schedule}"
         if args.posterior_temp_schedule == "sigma_ramp":
             tag += f"_lo{args.posterior_temp_sigma_lo:g}_hi{args.posterior_temp_sigma_hi:g}"
+        if args.posterior_temp_space != "bit":
+            tag += f"_{args.posterior_temp_space}"
+            if args.codeword_topk is not None:
+                tag += f"k{args.codeword_topk}"
     if args.sigma_max is not None:
         tag += f"_smax{args.sigma_max:g}"
     if args.sigma_min is not None:

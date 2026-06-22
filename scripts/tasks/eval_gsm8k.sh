@@ -25,6 +25,9 @@ PT_TARGET="${PT_TARGET:-learned}"
 PT_SCHEDULE="${PT_SCHEDULE:-const}"
 PT_SIGMA_LO="${PT_SIGMA_LO:-0.1}"
 PT_SIGMA_HI="${PT_SIGMA_HI:-4.0}"
+# PT_SPACE: bit (per-bit, factorized) | token (joint valid-codeword, MDLM/Duo analogue).
+PT_SPACE="${PT_SPACE:-bit}"
+CODEWORD_TOPK="${CODEWORD_TOPK:-}"
 
 python -m evaluation.tasks.gsm8k_eval \
   --config configs/tasks/tinygsm_bits.py \
@@ -34,4 +37,6 @@ python -m evaluation.tasks.gsm8k_eval \
   --posterior_temp "${PT}" --posterior_temp_target "${PT_TARGET}" \
   --posterior_temp_schedule "${PT_SCHEDULE}" \
   --posterior_temp_sigma_lo "${PT_SIGMA_LO}" --posterior_temp_sigma_hi "${PT_SIGMA_HI}" \
+  --posterior_temp_space "${PT_SPACE}" \
+  ${CODEWORD_TOPK:+--codeword_topk "${CODEWORD_TOPK}"} \
   ${SIGMA_DATA:+--sigma_data "${SIGMA_DATA}"}

@@ -1604,6 +1604,20 @@ class DDIMSampler:
         self.repr_mode = str(getattr(cfg.data, "representation", "binary")).lower()
         self.is_cont_tokens = (self.repr_mode == "tokens")
         self.vocab_size = int(getattr(cfg.data, "vocab_size", 1)) if self.is_cont_tokens else 1
+        self.bits_per_token = int(getattr(cfg.data, "bits_per_token", 16))
+        self._codebook_cache = {}
+
+    def _get_codebook(self, vocab_size):
+        """Valid-codeword matrix C [V, bits_per_token] (MSB-first), cached on device."""
+        key = int(vocab_size)
+        C = self._codebook_cache.get(key)
+        if C is None:
+            from data.task_codec import token_ids_to_bits
+            # [V,1] -> [V, bits_per_token]: each id maps to its own codeword row.
+            ids = torch.arange(key, device=self.device).unsqueeze(-1)
+            C = token_ids_to_bits(ids, self.bits_per_token).to(device=self.device, dtype=torch.float32)
+            self._codebook_cache[key] = C
+        return C
 
     @torch.no_grad()
     def sample(
@@ -1631,6 +1645,9 @@ class DDIMSampler:
         posterior_temp_schedule: str = "const",
         posterior_temp_sigma_lo: float = 0.1,
         posterior_temp_sigma_hi: float = 4.0,
+        posterior_temp_space: str = "bit",
+        codeword_vocab_size: Optional[int] = None,
+        codeword_topk: Optional[int] = None,
     ):
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
@@ -1643,6 +1660,20 @@ class DDIMSampler:
                 sigma_lo=float(posterior_temp_sigma_lo),
                 sigma_hi=float(posterior_temp_sigma_hi),
             )
+
+        # Joint valid-codeword (token-space) sharpening context, built once.
+        pt_ctx = None
+        if str(posterior_temp_space).lower() == "token" and not self.is_cont_tokens:
+            if codeword_vocab_size is None:
+                raise ValueError(
+                    "posterior_temp_space='token' requires codeword_vocab_size "
+                    "(the number of valid token codes)."
+                )
+            pt_ctx = {
+                "space": "token",
+                "codebook": self._get_codebook(int(codeword_vocab_size)),
+                "topk": codeword_topk,
+            }
 
         B = int(num_samples)
         S = int(seq_len)
@@ -1761,7 +1792,7 @@ class DDIMSampler:
                 logits_cat = _model_logits_continuous(
                     self.model, self.cfg, x_cat, sig_cat, cond_cat,
                     posterior_temp=_temp_at(sigma_eval_cur),
-                    posterior_temp_target=posterior_temp_target,
+                    posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                 )
                 probs_c = logits_to_x0_hat(
                     logits_cat[:B],
@@ -1820,7 +1851,7 @@ class DDIMSampler:
                             sig_ref_cat,
                             cond_ref_cat,
                             posterior_temp=_temp_at(sigma_eval_next),
-                            posterior_temp_target=posterior_temp_target,
+                            posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                         )
                         x0_hat_c = logits_to_x0_hat(
                             logits_ref_cat[:B],
@@ -1850,7 +1881,7 @@ class DDIMSampler:
                 logits = _model_logits_continuous(
                     self.model, self.cfg, x_state, sig_B, cond_in,
                     posterior_temp=_temp_at(sigma_eval_cur),
-                    posterior_temp_target=posterior_temp_target,
+                    posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                 )
                 probs = logits_to_x0_hat(
                     logits,
@@ -1889,7 +1920,7 @@ class DDIMSampler:
                             sig_next_B,
                             x0_hat_cur,
                             posterior_temp=_temp_at(sigma_eval_next),
-                            posterior_temp_target=posterior_temp_target,
+                            posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                         )
                         x0_hat = logits_to_x0_hat(
                             logits_ref,
@@ -1936,7 +1967,7 @@ class DDIMSampler:
                     sig_cat,
                     cond_cat,
                     posterior_temp=_temp_at(sigma_final),
-                    posterior_temp_target=posterior_temp_target,
+                    posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                 )
 
                 probs_c = logits_to_x0_hat(
@@ -1968,7 +1999,7 @@ class DDIMSampler:
                 sig_B,
                 cond_in,
                 posterior_temp=_temp_at(sigma_final),
-                posterior_temp_target=posterior_temp_target,
+                posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
             )
 
             probs = logits_to_x0_hat(
@@ -2016,7 +2047,7 @@ class DDIMSampler:
                     sig_cat,
                     cond_cat,
                     posterior_temp=_temp_at(sigma_final),
-                    posterior_temp_target=posterior_temp_target,
+                    posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                 )
 
                 probs_c = logits_to_x0_hat(
@@ -2050,7 +2081,7 @@ class DDIMSampler:
                     sig_B,
                     cond_in,
                     posterior_temp=_temp_at(sigma_final),
-                    posterior_temp_target=posterior_temp_target,
+                    posterior_temp_target=posterior_temp_target, pt_ctx=pt_ctx,
                 )
 
                 probs_out = logits_to_x0_hat(
