@@ -49,6 +49,8 @@ def apply_continuous_logit_postprocessing(
     matched_filter_scale: float = 1.0,
     matched_filter_clip: float | None = None,
     is_cont_tokens: bool = False,
+    posterior_temp: float = 1.0,
+    posterior_temp_target: str = "learned",
 ) -> torch.Tensor:
     """
     Apply continuous-output postprocessing outside the compiled model.
@@ -70,6 +72,18 @@ def apply_continuous_logit_postprocessing(
       * continuous one-hot token runs often use:
             data_center = 1 / V         (for input centering)
             matched_filter_center = 0.5 or data_center, depending on design
+
+    Posterior temperature (CoBit's continuous analogue of MDLM/Duo low-T
+    decoding). With T<1 the per-bit Bernoulli posterior sigmoid(logit/T) is
+    sharpened toward 0/1 (the joint mode of the factorized code). Two targets:
+      - "learned": sharpen ONLY the network's learned logit, leaving the
+        analytic matched-filter data-consistency term at T=1:
+            logit_out = logit_raw / T + mf
+        This is the principled default (the MF term is the likelihood gradient,
+        not a belief to sharpen).
+      - "full": sharpen the whole postprocessed logit (logit_raw + mf) / T.
+    For non-matched-filter modes the two targets coincide (logit / T).
+    T == 1.0 reproduces the untempered output bit-for-bit.
     """
     mode = str(mode).lower()
     if mode == "matched_filter":
@@ -77,8 +91,14 @@ def apply_continuous_logit_postprocessing(
 
     logits = canonicalize_continuous_logits(logits, is_cont_tokens=is_cont_tokens)
 
+    T = float(posterior_temp)
+    apply_temp = abs(T - 1.0) > 1e-8
+    if apply_temp and T <= 0.0:
+        raise ValueError(f"posterior_temp must be > 0, got {T}")
+    target = str(posterior_temp_target).lower()
+
     if mode == "none":
-        return logits
+        return logits / T if apply_temp else logits
 
     if mode == "inv_sigma2":
         if logits.dim() == 2:
@@ -89,7 +109,8 @@ def apply_continuous_logit_postprocessing(
             raise ValueError(f"Unexpected logits ndim={logits.dim()}, expected 2 or 3")
 
         sigma2 = sigma2.clamp_min(torch.finfo(logits.dtype).tiny)
-        return logits / sigma2
+        out = logits / sigma2
+        return out / T if apply_temp else out
 
     if mode in {"matched_filter_residual", "matched_filter_only"}:
         if x_t is None:
@@ -126,7 +147,18 @@ def apply_continuous_logit_postprocessing(
         mf = mf.to(dtype=logits.dtype)
 
         if mode == "matched_filter_only":
+            # No learned component to sharpen; "learned" target leaves mf intact.
+            if apply_temp and target == "full":
+                return mf / T
             return mf
+
+        # matched_filter_residual
+        if apply_temp:
+            if target == "learned":
+                return logits / T + mf
+            if target == "full":
+                return (logits + mf) / T
+            raise ValueError(f"Unknown posterior_temp_target='{target}'")
         return logits + mf
 
     raise ValueError(f"Unknown continuous_logit_scaling='{mode}'")
@@ -141,6 +173,9 @@ def _model_logits_continuous(
     x_t: torch.Tensor,
     sigma: torch.Tensor,
     x0_hat: Optional[torch.Tensor],
+    *,
+    posterior_temp: float = 1.0,
+    posterior_temp_target: Optional[str] = None,
 ) -> torch.Tensor:
     """
     Shared cfg-aware helper for continuous models.
@@ -148,8 +183,19 @@ def _model_logits_continuous(
     Returns canonical public logits:
       - binary mode: [B,S]
       - token mode:  [B,S,V]
+
+    posterior_temp: per-call temperature applied to the bit posterior (see
+    apply_continuous_logit_postprocessing). Defaults to 1.0 => no change.
+    posterior_temp_target: "learned" (default) or "full"; falls back to
+    cfg.model.posterior_temp_target then "learned" when None.
     """
     logits_raw = model(x_t, sigma, x0_hat)
+
+    target = (
+        posterior_temp_target
+        if posterior_temp_target is not None
+        else str(getattr(cfg.model, "posterior_temp_target", "learned"))
+    )
 
     return apply_continuous_logit_postprocessing(
         logits_raw,
@@ -167,5 +213,7 @@ def _model_logits_continuous(
         matched_filter_scale=float(getattr(cfg.model, "matched_filter_scale", 1.0)),
         matched_filter_clip=getattr(cfg.model, "matched_filter_clip", None),
         is_cont_tokens=_is_cont_tokens_cfg(cfg),
+        posterior_temp=float(posterior_temp),
+        posterior_temp_target=target,
     )
     

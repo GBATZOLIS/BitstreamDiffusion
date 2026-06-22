@@ -231,6 +231,66 @@ def _apply_edm_churn(
 
 
 # -----------------------------------------------------------------------------
+# Helpers for posterior-temperature decoding (continuous analogue of MDLM/Duo
+# low-T / S-FLM top-k=1). T<1 sharpens the per-bit Bernoulli posterior toward
+# 0/1. Applied as a sigma-dependent schedule so the high-sigma exploration band
+# (where churn supplies diversity) and the saturated low-sigma tail (where the
+# matched filter dominates and T is inert) are left at T=1.
+# -----------------------------------------------------------------------------
+
+def _posterior_temp_at(
+    sigma: float,
+    *,
+    temp: float,
+    schedule: str,
+    sigma_lo: float,
+    sigma_hi: float,
+) -> float:
+    """
+    Resolve the temperature at a given noise level.
+
+    temp is the target/strength (the floor T<1).
+      - schedule == "const":      T = temp at every sigma.
+      - schedule == "sigma_ramp": T = 1.0 for sigma >= sigma_hi, T = temp for
+        sigma <= sigma_lo, log-linear interpolation in between. Keeps high-sigma
+        steps untempered (protects diversity) and sharpens the crystallization
+        band.
+    temp == 1.0 (or within 1e-8) returns 1.0 everywhere (no-op).
+    """
+    T = float(temp)
+    if abs(T - 1.0) <= 1e-8:
+        return 1.0
+
+    schedule = str(schedule).lower()
+    if schedule == "const":
+        return T
+
+    if schedule == "sigma_ramp":
+        s = float(sigma)
+        hi = float(sigma_hi)
+        lo = float(sigma_lo)
+        if hi <= lo:
+            return T
+        if s >= hi:
+            return 1.0
+        if s <= lo:
+            return T
+        log_s = math.log(max(s, 1e-20))
+        log_hi = math.log(max(hi, 1e-20))
+        log_lo = math.log(max(lo, 1e-20))
+        frac = (log_hi - log_s) / (log_hi - log_lo)  # 0 at hi -> 1 at lo
+        return 1.0 + frac * (T - 1.0)
+
+    raise ValueError(f"Unknown posterior_temp_schedule='{schedule}'")
+
+
+def _sigma_scalar(sigma: torch.Tensor | float) -> float:
+    if isinstance(sigma, torch.Tensor):
+        return float(sigma.reshape(-1)[0].item())
+    return float(sigma)
+
+
+# -----------------------------------------------------------------------------
 # Helpers for conditional prompting + CFG
 # -----------------------------------------------------------------------------
 
@@ -1566,9 +1626,23 @@ class DDIMSampler:
         ati_eta: Optional[float] = None,
         return_probs: bool = False,
         progress: bool = True,
+        posterior_temp: float = 1.0,
+        posterior_temp_target: str = "learned",
+        posterior_temp_schedule: str = "const",
+        posterior_temp_sigma_lo: float = 0.1,
+        posterior_temp_sigma_hi: float = 4.0,
     ):
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
+
+        def _temp_at(sigma_val) -> float:
+            return _posterior_temp_at(
+                _sigma_scalar(sigma_val),
+                temp=float(posterior_temp),
+                schedule=posterior_temp_schedule,
+                sigma_lo=float(posterior_temp_sigma_lo),
+                sigma_hi=float(posterior_temp_sigma_hi),
+            )
 
         B = int(num_samples)
         S = int(seq_len)
@@ -1684,7 +1758,11 @@ class DDIMSampler:
                 else:
                     cond_cat = torch.zeros_like(x_cat)
 
-                logits_cat = _model_logits_continuous(self.model, self.cfg, x_cat, sig_cat, cond_cat)
+                logits_cat = _model_logits_continuous(
+                    self.model, self.cfg, x_cat, sig_cat, cond_cat,
+                    posterior_temp=_temp_at(sigma_eval_cur),
+                    posterior_temp_target=posterior_temp_target,
+                )
                 probs_c = logits_to_x0_hat(
                     logits_cat[:B],
                     dtype=x.dtype,
@@ -1741,6 +1819,8 @@ class DDIMSampler:
                             x_ref_cat,
                             sig_ref_cat,
                             cond_ref_cat,
+                            posterior_temp=_temp_at(sigma_eval_next),
+                            posterior_temp_target=posterior_temp_target,
                         )
                         x0_hat_c = logits_to_x0_hat(
                             logits_ref_cat[:B],
@@ -1767,7 +1847,11 @@ class DDIMSampler:
                     if self.sc_enabled:
                         _clamp_mask_(cond_in, prefix_full, prefix_mask)
 
-                logits = _model_logits_continuous(self.model, self.cfg, x_state, sig_B, cond_in)
+                logits = _model_logits_continuous(
+                    self.model, self.cfg, x_state, sig_B, cond_in,
+                    posterior_temp=_temp_at(sigma_eval_cur),
+                    posterior_temp_target=posterior_temp_target,
+                )
                 probs = logits_to_x0_hat(
                     logits,
                     dtype=x.dtype,
@@ -1804,6 +1888,8 @@ class DDIMSampler:
                             x,
                             sig_next_B,
                             x0_hat_cur,
+                            posterior_temp=_temp_at(sigma_eval_next),
+                            posterior_temp_target=posterior_temp_target,
                         )
                         x0_hat = logits_to_x0_hat(
                             logits_ref,
@@ -1849,6 +1935,8 @@ class DDIMSampler:
                     x_cat,
                     sig_cat,
                     cond_cat,
+                    posterior_temp=_temp_at(sigma_final),
+                    posterior_temp_target=posterior_temp_target,
                 )
 
                 probs_c = logits_to_x0_hat(
@@ -1879,6 +1967,8 @@ class DDIMSampler:
                 x,
                 sig_B,
                 cond_in,
+                posterior_temp=_temp_at(sigma_final),
+                posterior_temp_target=posterior_temp_target,
             )
 
             probs = logits_to_x0_hat(
@@ -1925,6 +2015,8 @@ class DDIMSampler:
                     x_cat,
                     sig_cat,
                     cond_cat,
+                    posterior_temp=_temp_at(sigma_final),
+                    posterior_temp_target=posterior_temp_target,
                 )
 
                 probs_c = logits_to_x0_hat(
@@ -1957,6 +2049,8 @@ class DDIMSampler:
                     x,
                     sig_B,
                     cond_in,
+                    posterior_temp=_temp_at(sigma_final),
+                    posterior_temp_target=posterior_temp_target,
                 )
 
                 probs_out = logits_to_x0_hat(

@@ -170,14 +170,27 @@ def sample_bits(
     schedule: str = "entropic",
     entropy_run_dir: Optional[str] = None,
     sigma_min_override: Optional[float] = None,
+    sigma_max_override: Optional[float] = None,
     seed: Optional[int] = None,
     guidance_scale: Optional[float] = None,
+    posterior_temp: float = 1.0,
+    posterior_temp_target: str = "learned",
+    posterior_temp_schedule: str = "const",
+    posterior_temp_sigma_lo: float = 0.1,
+    posterior_temp_sigma_hi: float = 4.0,
 ) -> torch.Tensor:
     """Run conditional sampling and return decoded bits [B, S] (long, 0/1).
 
     guidance_scale: classifier-free guidance weight w (probs = probs_u +
     w*(probs_c - probs_u)). None/0 => no guidance (plain conditional path).
     Requires a checkpoint trained with conditioning dropout (cfg.cond.p_uncond>0).
+
+    posterior_temp: continuous analogue of MDLM/Duo low-T decoding. T<1 sharpens
+    the per-bit Bernoulli posterior sigmoid(logit/T) toward 0/1 during the
+    trajectory. target "learned" sharpens only the network logit (leaving the
+    matched-filter data-consistency term untouched); schedule "sigma_ramp"
+    applies it only across [sigma_lo, sigma_hi] (T=1 above sigma_hi). T=1 is a
+    no-op (bit-identical to the untempered sampler).
     """
     if seed is not None:
         torch.manual_seed(int(seed))
@@ -198,11 +211,17 @@ def sample_bits(
             schedule=schedule,
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
+            sigma_max_override=sigma_max_override,
             guidance_scale=guidance_scale,
             sc_refresh_mode="carry",
             ati_eta=0.0,
             return_probs=True,
             progress=False,
+            posterior_temp=posterior_temp,
+            posterior_temp_target=posterior_temp_target,
+            posterior_temp_schedule=posterior_temp_schedule,
+            posterior_temp_sigma_lo=posterior_temp_sigma_lo,
+            posterior_temp_sigma_hi=posterior_temp_sigma_hi,
         )
     bits = (probs.float() >= 0.5).long()
     return bits

@@ -71,6 +71,9 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sigma_min", type=float, default=None)
+    ap.add_argument("--sigma_max", type=float, default=None,
+                    help="Override the reverse-integration START sigma (default: cfg sigma_max=80). "
+                         "Cap below the undertrained/collapsed high-sigma band to test that hypothesis.")
     ap.add_argument("--sigma_data", type=float, default=None,
                     help="Override EDM preconditioning sigma_data used at sampling "
                          "(feeds c_in=1/sqrt(sigma^2+sigma_data^2) in the denoiser). "
@@ -87,6 +90,19 @@ def main():
                     help="as_saved: lambda_0 = S_churn anchor (use for EDM-equivalence + above-cap sweeps).")
     ap.add_argument("--guidance_mode", default="predictor_only", choices=["predictor_only", "all"],
                     help="PC only: predictor_only guides PF predictor, corrector uses conditional score.")
+    # Posterior temperature: continuous analogue of MDLM/Duo low-T / S-FLM top-k=1.
+    # T<1 sharpens the per-bit Bernoulli posterior sigmoid(logit/T) toward 0/1.
+    ap.add_argument("--posterior_temp", type=float, default=1.0,
+                    help="Bit-posterior temperature T (<1 sharpens; 1.0 = no-op).")
+    ap.add_argument("--posterior_temp_target", default="learned", choices=["learned", "full"],
+                    help="learned: temper only the network logit, leave matched-filter at T=1 (recommended). "
+                         "full: temper the whole postprocessed logit.")
+    ap.add_argument("--posterior_temp_schedule", default="const", choices=["const", "sigma_ramp"],
+                    help="const: T everywhere. sigma_ramp: T=1 above sigma_hi -> T at/below sigma_lo (log-interp).")
+    ap.add_argument("--posterior_temp_sigma_lo", type=float, default=0.1,
+                    help="sigma_ramp lower edge: at/below this sigma, full temperature T applies.")
+    ap.add_argument("--posterior_temp_sigma_hi", type=float, default=4.0,
+                    help="sigma_ramp upper edge: at/above this sigma, T=1 (untempered, protects diversity).")
     ap.add_argument("--out_dir", default=None)
     args = ap.parse_args()
 
@@ -130,8 +146,14 @@ def main():
         bits = sample_bits(
             cfg, sampler, prefix_full=x0, prefix_mask=pm, num_steps=steps,
             schedule=schedule, entropy_run_dir=str(run_dir),
-            sigma_min_override=args.sigma_min, seed=args.seed,
+            sigma_min_override=args.sigma_min, sigma_max_override=args.sigma_max,
+            seed=args.seed,
             guidance_scale=args.guidance_scale,
+            posterior_temp=args.posterior_temp,
+            posterior_temp_target=args.posterior_temp_target,
+            posterior_temp_schedule=args.posterior_temp_schedule,
+            posterior_temp_sigma_lo=args.posterior_temp_sigma_lo,
+            posterior_temp_sigma_hi=args.posterior_temp_sigma_hi,
         )
         gen_ids = bits_to_token_ids(bits, bpt)  # [B,512]
 
@@ -174,6 +196,11 @@ def main():
         "lambda_profile": args.lambda_profile,
         "lambda_normalize": args.lambda_normalize,
         "guidance_mode": args.guidance_mode,
+        "posterior_temp": args.posterior_temp,
+        "posterior_temp_target": args.posterior_temp_target,
+        "posterior_temp_schedule": args.posterior_temp_schedule,
+        "posterior_temp_sigma_lo": args.posterior_temp_sigma_lo,
+        "posterior_temp_sigma_hi": args.posterior_temp_sigma_hi,
         "steps": steps,
         "sigma_data": sigma_data_used,
         "num_examples": int(n),
@@ -187,6 +214,14 @@ def main():
         "sample_records": records,
     }
     tag = f"{args.sampler}_g{args.gamma}_w{args.guidance_scale}_s{steps}_sd{sigma_data_used:.4f}_ema{int(bool(args.ema))}"
+    if abs(float(args.posterior_temp) - 1.0) > 1e-8:
+        tag += f"_pt{args.posterior_temp:g}_{args.posterior_temp_target}_{args.posterior_temp_schedule}"
+        if args.posterior_temp_schedule == "sigma_ramp":
+            tag += f"_lo{args.posterior_temp_sigma_lo:g}_hi{args.posterior_temp_sigma_hi:g}"
+    if args.sigma_max is not None:
+        tag += f"_smax{args.sigma_max:g}"
+    if args.sigma_min is not None:
+        tag += f"_smin{args.sigma_min:g}"
     if args.sampler_kind != "ddim":
         tag += f"_kind{args.sampler_kind}_lz{args.lambda_zero:g}_{args.lambda_normalize}"
         if args.sampler_kind == "pc":

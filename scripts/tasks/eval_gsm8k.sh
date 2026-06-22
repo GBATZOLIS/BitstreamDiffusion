@@ -15,9 +15,23 @@ LIMIT="${LIMIT:-1319}"
 # Set SIGMA_DATA=0.3998 to match the value the model was actually trained with.
 SIGMA_DATA="${SIGMA_DATA:-}"
 
+# Posterior-temperature decoding (continuous analogue of MDLM/Duo low-T).
+# PT=1.0 => no-op (untempered headline). PT<1 sharpens the per-bit posterior.
+#   PT_TARGET   : learned (recommended) | full
+#   PT_SCHEDULE : const | sigma_ramp
+#   PT_SIGMA_LO / PT_SIGMA_HI : sigma_ramp band edges
+PT="${PT:-1.0}"
+PT_TARGET="${PT_TARGET:-learned}"
+PT_SCHEDULE="${PT_SCHEDULE:-const}"
+PT_SIGMA_LO="${PT_SIGMA_LO:-0.1}"
+PT_SIGMA_HI="${PT_SIGMA_HI:-4.0}"
+
 python -m evaluation.tasks.gsm8k_eval \
   --config configs/tasks/tinygsm_bits.py \
   --checkpoint "${CKPT}" \
   --sampler "${SAMPLER}" --sampler_kind "${SAMPLER_KIND}" --schedule "${SCHEDULE}" \
   --gamma "${GAMMA}" --steps "${STEPS}" --limit "${LIMIT}" \
+  --posterior_temp "${PT}" --posterior_temp_target "${PT_TARGET}" \
+  --posterior_temp_schedule "${PT_SCHEDULE}" \
+  --posterior_temp_sigma_lo "${PT_SIGMA_LO}" --posterior_temp_sigma_hi "${PT_SIGMA_HI}" \
   ${SIGMA_DATA:+--sigma_data "${SIGMA_DATA}"}
