@@ -160,6 +160,7 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
         "task": "sudoku", "difficulty": cfg.data.difficulty,
         "checkpoint": str(args.checkpoint), "sampler_kind": args.sampler_kind,
         "beta": args.beta, "num_particles": K, "steps": steps,
+        "proposal": args.proposal, "churn_gamma": args.churn_gamma,
         "lambda_zero": args.lambda_zero, "lambda_profile": args.lambda_profile,
         "lambda_normalize": args.lambda_normalize, "resampling_policy": args.resampling_policy,
         "ess_threshold": args.ess_threshold, "sc_policy": args.sc_policy,
@@ -175,9 +176,10 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
         "mean_final_unique_ancestors": (sum(uniq_anc) / len(uniq_anc)) if uniq_anc else None,
         "sample_records": records,
     }
-    tag = (f"{cfg.data.difficulty}_fkc_beta{args.beta:g}_K{K}_s{steps}_lz{args.lambda_zero:g}"
-           f"_{args.lambda_normalize}_{args.resampling_policy}_sc{args.sc_policy}"
-           f"_ess{args.ess_threshold:g}_ema{int(bool(args.ema))}")
+    prop_tag = (f"em_lz{args.lambda_zero:g}" if args.proposal == "em"
+                else f"churn_g{args.churn_gamma:g}")
+    tag = (f"{cfg.data.difficulty}_fkc_{prop_tag}_beta{args.beta:g}_K{K}_s{steps}"
+           f"_{args.resampling_policy}_sc{args.sc_policy}_ess{args.ess_threshold:g}_ema{int(bool(args.ema))}")
     out_path = out_dir / f"sudoku_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== SUDOKU FKC RESULT ===")
@@ -254,6 +256,13 @@ def main():
     ap.add_argument("--prior_mode", default="sampler_gaussian",
                     choices=["sampler_gaussian", "forward_marginal_diag"],
                     help="FKC tempered prior variance: sigma_max^2/beta (default) or (sigma_max^2+v)/beta.")
+    ap.add_argument("--proposal", default="em", choices=["em", "edm_churn"],
+                    help="FKC proposal: em = explicit entropy-gated reverse-SDE Euler-Maruyama "
+                         "(lambda_zero); edm_churn = EDM-churn proposal (churn_gamma), the "
+                         "asymptotically-exact churn analogue -- far more stable at low NFE.")
+    ap.add_argument("--churn_gamma", type=float, default=0.0,
+                    help="FKC edm_churn proposal: per-step churn gamma (capped at sqrt(2)-1). "
+                         "Provides the stochasticity that lets duplicated ancestors branch.")
     ap.add_argument("--out_dir", default=None)
     ap.add_argument("--allow_cpu", action="store_true",
                     help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
@@ -293,7 +302,8 @@ def main():
         fkc_resampling_policy=args.resampling_policy,
         fkc_ess_threshold_fraction=args.ess_threshold,
         fkc_final_resample=bool(args.final_resample),
-        fkc_sc_policy=args.sc_policy, fkc_prior_mode=args.prior_mode)
+        fkc_sc_policy=args.sc_policy, fkc_prior_mode=args.prior_mode,
+        fkc_proposal=args.proposal, fkc_churn_gamma=args.churn_gamma)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 

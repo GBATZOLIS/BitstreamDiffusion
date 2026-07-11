@@ -2541,6 +2541,8 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
         sc_policy: str = "inherit",
         prior_mode: str = "sampler_gaussian",
         clean_bit_variance: float = 0.25,
+        proposal: str = "em",
+        churn_gamma: float = 0.0,
     ):
         super().__init__(model, forward_process, cfg)
         if float(beta) < 1.0:
@@ -2549,6 +2551,10 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             raise ValueError(f"num_particles must be >= 1, got {num_particles}")
         if float(lambda_zero) < 0.0:
             raise ValueError(f"lambda_zero must be >= 0, got {lambda_zero}")
+        if str(proposal) not in {"em", "edm_churn"}:
+            raise ValueError(f"proposal must be 'em' or 'edm_churn', got {proposal!r}")
+        if float(churn_gamma) < 0.0:
+            raise ValueError(f"churn_gamma must be >= 0, got {churn_gamma}")
         if str(resampling_policy) not in {"ess", "every_step_active", "never"}:
             raise ValueError(f"unknown resampling_policy={resampling_policy!r}")
         if str(sc_policy) not in {"inherit", "zero", "stateless_two_pass"}:
@@ -2567,6 +2573,8 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
         self.sc_policy = str(sc_policy)
         self.prior_mode = str(prior_mode)
         self.clean_bit_variance = float(clean_bit_variance)
+        self.proposal = str(proposal)
+        self.churn_gamma = float(churn_gamma)
         self._current_profile = None
 
     # Reuse EM's profile construction verbatim.
@@ -2660,7 +2668,9 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             schedule=schedule, num_steps=num_steps, entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override, sigma_max_override=sigma_max_override,
         )
-        self._current_profile = self._build_profile(entropy_run_dir)
+        # Only the EM proposal needs a lambda profile; the churn proposal owns its
+        # own stochasticity via churn_gamma (and needs no entropy tables).
+        self._current_profile = self._build_profile(entropy_run_dir) if self.proposal == "em" else None
         try:
             sigma0 = sigmas[0]
 
@@ -2709,41 +2719,65 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                     _clamp_mask_(x, pf, pm)
                     _clamp_mask_(sc, pf, pm)
 
+                # ---- proposal stochasticity relative to the denoiser call ----
+                # em        : sigma_state = sigma_cur; Langevin noise added AFTER the
+                #             drift (explicit reverse-SDE Euler-Maruyama step).
+                # edm_churn : churn up to sigma_hat = sigma_cur*(1+gamma) BEFORE the
+                #             denoiser (EDM Alg.2), then a beta-scaled PF-ODE step down.
+                #             The FKC weight/tempering is identical; this is the
+                #             APPROXIMATE (asymptotically-exact) churn analogue of the
+                #             reverse-SDE proposal, empirically far more stable at low
+                #             NFE on these checkpoints.
+                if self.proposal == "edm_churn" and self.churn_gamma > 0.0:
+                    gamma = min(self.churn_gamma, math.sqrt(2.0) - 1.0)
+                    sigma_state = sigma_cur * (1.0 + gamma)
+                    eps = torch.randn_like(x)                                  # GLOBAL RNG
+                    _zero_mask_(eps, pm)
+                    x = x + (sigma_state.square() - sigma_cur.square()).clamp_min(0.0).sqrt() * eps
+                    if cond_enabled:
+                        _clamp_mask_(x, pf, pm)
+                else:
+                    sigma_state = sigma_cur
+
                 x_flat = x.reshape(B * K, S)
                 sc_flat = sc.reshape(B * K, S)
-                probs_flat = self._sc_posterior(x_flat, sigma_cur, sc_flat)     # D_k [N,S]
+                probs_flat = self._sc_posterior(x_flat, sigma_state, sc_flat)  # D_k [N,S]
                 probs = probs_flat.reshape(B, K, S)
                 if cond_enabled:
                     _clamp_mask_(probs, pf, pm)
 
                 score_flat = _score_from_probs(
-                    probs.reshape(B * K, S), x_flat, sigma_cur, is_cont_tokens=False,
+                    probs.reshape(B * K, S), x_flat, sigma_state, is_cont_tokens=False,
                 )                                                              # [N,S]
-                d = (-sigma_cur * score_flat).reshape(B, K, S)
+                d = (-sigma_state * score_flat).reshape(B, K, S)
                 _zero_mask_(d, pm)
                 score = score_flat.reshape(B, K, S)
 
                 # ---- FKC log-weight increment (unscaled score, free coords) ----
                 score_free = score.clone()
                 _zero_mask_(score_free, pm)
-                dsig2 = float(sigma_cur) ** 2 - float(sigma_next) ** 2
+                dsig2 = float(sigma_state) ** 2 - float(sigma_next) ** 2
                 snorm2 = score_free.to(torch.float64).square().sum(dim=-1)      # [B,K]
                 dlogw = 0.5 * beta * (beta - 1.0) * dsig2 * snorm2
                 if not torch.isfinite(dlogw).all():
                     raise FloatingPointError(
-                        f"FKC weight increment non-finite at step {i}, sigma={float(sigma_cur):.4g}"
+                        f"FKC weight increment non-finite at step {i}, sigma={float(sigma_state):.4g}"
                     )
                 logw = logw + dlogw
 
-                # ---- lambda for this step (entropy-gated) ----
-                lam = self._current_profile.evaluate(sigma_cur, state=x_flat)
-                delta = (sigma_cur - sigma_next).clamp_min(0.0)
-                if self.em_step_gamma_cap is not None and float(self.lambda_zero) > 0.0:
-                    lam_cap = self.em_step_gamma_cap * sigma_cur / delta.clamp_min(1e-12)
-                    lam = torch.minimum(lam, lam_cap)
-                lam_active = bool(float(self.lambda_zero) > 0.0 and float(lam) > 0.0)
+                # ---- per-step lambda (em) + resampling activity flag ----
+                delta = (sigma_state - sigma_next).clamp_min(0.0)
+                if self.proposal == "em":
+                    lam = self._current_profile.evaluate(sigma_state, state=x_flat)
+                    if self.em_step_gamma_cap is not None and float(self.lambda_zero) > 0.0:
+                        lam_cap = self.em_step_gamma_cap * sigma_state / delta.clamp_min(1e-12)
+                        lam = torch.minimum(lam, lam_cap)
+                    lam_active = bool(float(self.lambda_zero) > 0.0 and float(lam) > 0.0)
+                else:  # edm_churn: churn supplies stochasticity -> particles can branch
+                    lam = None
+                    lam_active = bool(self.churn_gamma > 0.0)
 
-                # ---- ESS + resampling BEFORE propagation (only where lambda>0) ----
+                # ---- ESS + resampling BEFORE propagation (only where stochastic) ----
                 ess = effective_sample_size(logw)                              # [B]
                 do_group = torch.zeros(B, dtype=torch.bool, device=dev)
                 if lam_active and self.resampling_policy != "never":
@@ -2763,15 +2797,17 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                     ancestors = gather_particles(ancestors, idx)
                     logw = torch.where(do_group.unsqueeze(1), torch.zeros_like(logw), logw)
 
-                # ---- EM proposal: beta-scaled full drift, noise unchanged ----
-                h = sigma_next - sigma_cur
-                if float(self.lambda_zero) == 0.0:
+                # ---- propagation: beta-scaled drift ----
+                h = sigma_next - sigma_state
+                if self.proposal == "edm_churn":
+                    x = x + h * beta * d          # stochasticity already injected by churn
+                elif float(self.lambda_zero) == 0.0:
                     x = x + h * beta * d
                 else:
                     x_det = x + h * beta * (1.0 + lam) * d
                     z = torch.randn_like(x)                                     # GLOBAL RNG
                     _zero_mask_(z, pm)
-                    noise = (2.0 * lam * sigma_cur * delta).clamp_min(0.0).sqrt()
+                    noise = (2.0 * lam * sigma_state * delta).clamp_min(0.0).sqrt()
                     x = x_det + noise * z
 
                 if cond_enabled:

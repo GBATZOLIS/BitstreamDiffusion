@@ -86,7 +86,9 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
                            fkc_ess_threshold_fraction: float = 0.5,
                            fkc_final_resample: bool = True,
                            fkc_sc_policy: str = "inherit",
-                           fkc_prior_mode: str = "sampler_gaussian"):
+                           fkc_prior_mode: str = "sampler_gaussian",
+                           fkc_proposal: str = "em",
+                           fkc_churn_gamma: float = 0.0):
     """Return (model, sampler). Applies EMA shadow weights if present.
 
     sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
@@ -157,6 +159,8 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
             final_resample=bool(fkc_final_resample),
             sc_policy=str(fkc_sc_policy),
             prior_mode=str(fkc_prior_mode),
+            proposal=str(fkc_proposal),
+            churn_gamma=float(fkc_churn_gamma),
             **fkc_kwargs,
         )
     else:

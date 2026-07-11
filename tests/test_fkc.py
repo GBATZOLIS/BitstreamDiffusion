@@ -88,6 +88,53 @@ def test_gate1_stochastic_bit_identical_to_em():
     _gate1(0.5)
 
 
+def _ddim_with_churn(cfg, model, gamma, pf, pm, seed, steps=STEPS):
+    from ml_collections import config_dict
+    st = config_dict.ConfigDict()
+    st.enabled = True
+    st.s_churn = gamma * (steps - 1)      # -> per-step gamma_i = gamma (full band)
+    st.s_noise = 1.0
+    st.window_mode = "full"
+    st.entropy_quantile_lo = 0.0
+    st.entropy_quantile_hi = 1.0
+    st.entropy_fallback = "deterministic"
+    st.s_tmin = None
+    st.s_tmax = None
+    cfg.evaluation.stochastic = st
+    s = DDIMSampler(model, ContinuousForwardProcess(cfg), cfg)
+    torch.manual_seed(seed)
+    x, probs = s.sample(
+        num_samples=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=steps, schedule="karras", sc_refresh_mode="carry", ati_eta=0.0,
+        return_probs=True, progress=False,
+    )
+    return x, (probs >= 0.5).long()
+
+
+def test_gate1b_churn_proposal_bit_identical_to_ddim_churn():
+    # FKC-churn(beta=1, K=1) must reproduce the production DDIM+EDM-churn sampler
+    # bit-for-bit at a matched constant gamma (churn noise uses the global RNG in
+    # the same order; resampling uses an isolated generator).
+    g = 0.3
+    cfg_d = make_cpu_cfg(num_steps=STEPS)     # DDIM: churn enabled below
+    cfg_f = make_cpu_cfg(num_steps=STEPS)     # FKC: cfg churn stays disabled
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    x_d, bits_d = _ddim_with_churn(cfg_d, model, g, pf, pm, seed=123)
+    fkc = FeynmanKacEulerMaruyamaSampler(
+        model, ContinuousForwardProcess(cfg_f), cfg_f,
+        beta=1.0, num_particles=1, proposal="edm_churn", churn_gamma=g,
+    )
+    torch.manual_seed(123)
+    out = fkc.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=123, progress=False,
+    )
+    assert torch.equal(x_d, out.x.squeeze(1)), \
+        f"churn x max|diff|={float((x_d-out.x.squeeze(1)).abs().max()):.3e}"
+    assert torch.equal(bits_d, out.bits.squeeze(1))
+
+
 def test_gate2_beta_one_weights_are_noop():
     cfg = make_cpu_cfg(num_steps=STEPS)
     model = TinyBinaryDenoiser(S, seed=3)
