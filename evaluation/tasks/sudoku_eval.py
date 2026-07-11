@@ -96,6 +96,12 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
     total_resamples = 0
     uniq_anc = []
     records = []
+    # Weight-vs-correctness diagnostics (from the pre-final-resample population +
+    # its FKC log-weights; informative only when beta>1 so weights are non-uniform).
+    n_topw = n_botw = n_wvote = 0
+    mean_w_correct = 0.0
+    mean_w_incorrect = 0.0
+    nw_correct = nw_incorrect = 0
 
     for start in range(0, n, args.batch_size):
         idxs = list(range(start, min(start + args.batch_size, n)))
@@ -111,6 +117,10 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
         )
         S = x0.shape[1]
         gen_ids = bits_to_token_ids(out.bits.reshape(Bc * K, S), bpt).reshape(Bc, K, -1)  # [B,K,180]
+        # Pre-final-resample population + its FKC log-weights (for weight analysis).
+        gen_ids_pre = bits_to_token_ids(
+            out.pre_resample_bits.reshape(Bc * K, S), bpt).reshape(Bc, K, -1)
+        w_norm = torch.softmax(out.log_weights_final, dim=1).cpu()                # [B,K]
         gt_suffix = gt_ids[:, PROMPT_LEN_TOKENS:].cpu()
 
         d = out.diagnostics
@@ -148,9 +158,37 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
                 top = max(counts.items(), key=lambda kv: (kv[1], [-c for c in kv[0]]))
                 maj_ok = (list(top[0]) == gt)
             n_maj += int(maj_ok)
+
+            # ---- weight-vs-correctness (pre-final-resample population) ----
+            wb = w_norm[b]                                   # [K] normalized weights
+            correct_pre = []
+            valid_w = {}                                     # suffix -> summed weight (valid only)
+            for k in range(K):
+                rowp = gen_ids_pre[b, k].cpu().tolist()
+                sfx = rowp[PROMPT_LEN_TOKENS:]
+                ok = int(sfx == gt)
+                correct_pre.append(ok)
+                wk = float(wb[k])
+                cells_p, _ = _grid_cells(rowp, GRID_START_SOLUTION)
+                if _valid_sudoku(cells_p):
+                    valid_w[tuple(sfx)] = valid_w.get(tuple(sfx), 0.0) + wk
+                if ok:
+                    mean_w_correct += wk; nw_correct += 1
+                else:
+                    mean_w_incorrect += wk; nw_incorrect += 1
+            top_k = int(torch.argmax(wb).item())
+            bot_k = int(torch.argmin(wb).item())
+            n_topw += correct_pre[top_k]
+            n_botw += correct_pre[bot_k]
+            # weighted (soft) vote over valid grids (weight-weighted plurality)
+            if valid_w:
+                wv = max(valid_w.items(), key=lambda kv: (kv[1], [-c for c in kv[0]]))
+                n_wvote += int(list(wv[0]) == gt)
+
             if len(records) < 50:
                 records.append({"idx": gi, "pass": bool(any_exact), "maj": bool(maj_ok),
-                                "distinct": len(set(suffixes))})
+                                "distinct": len(set(suffixes)),
+                                "top_weight_correct": bool(correct_pre[top_k])})
 
         done = min(start + args.batch_size, n)
         print(f"[sudoku-fkc] {done}/{n}  pass@{K}={n_pass} ({100.0*n_pass/max(1,done):.1f}%)  "
@@ -169,6 +207,11 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
         "particle_mean_accuracy": part_correct / max(1, part_total),
         "pass_at_k": n_pass / max(1, n),
         "maj_at_k": n_maj / max(1, n),
+        "top_weight_accuracy": n_topw / max(1, n),
+        "bottom_weight_accuracy": n_botw / max(1, n),
+        "weighted_vote_accuracy": n_wvote / max(1, n),
+        "mean_weight_of_correct": (mean_w_correct / nw_correct) if nw_correct else None,
+        "mean_weight_of_incorrect": (mean_w_incorrect / nw_incorrect) if nw_incorrect else None,
         "valid_sudoku_rate": n_valid_part / max(1, part_total),
         "mean_distinct_solutions": distinct_sum / max(1, n),
         "min_ess": (None if min_ess == float("inf") else min_ess),
