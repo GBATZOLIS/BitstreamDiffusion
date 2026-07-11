@@ -21,6 +21,7 @@ from utils.ema import EMA
 from diffusion.continuous.processes import ContinuousForwardProcess
 from diffusion.continuous.samplers import (
     HeunSampler, DDIMSampler, EulerMaruyamaSampler, PredictorCorrectorSampler,
+    FeynmanKacEulerMaruyamaSampler,
 )
 
 
@@ -78,7 +79,14 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
                            lambda_profile: str = "entropy_rate",
                            lambda_normalize: str = "as_saved",
                            guidance_mode: str = "predictor_only",
-                           em_step_gamma_cap=None):
+                           em_step_gamma_cap=None,
+                           fkc_beta: float = 1.0,
+                           fkc_num_particles: int = 8,
+                           fkc_resampling_policy: str = "ess",
+                           fkc_ess_threshold_fraction: float = 0.5,
+                           fkc_final_resample: bool = True,
+                           fkc_sc_policy: str = "inherit",
+                           fkc_prior_mode: str = "sampler_gaussian"):
     """Return (model, sampler). Applies EMA shadow weights if present.
 
     sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
@@ -130,6 +138,26 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
             lambda_zero=float(lambda_zero),
             lambda_profile_normalize=str(lambda_normalize),
             guidance_mode=str(guidance_mode),
+        )
+    elif kind in {"fkc_em", "fkc"}:
+        # Feynman-Kac SMC sampler for the tempered target p^beta. Uses the same
+        # entropy-gated lambda machinery as EM; beta / K / resampling are FKC.
+        fkc_kwargs = {}
+        if em_step_gamma_cap is not None:
+            fkc_kwargs["em_step_gamma_cap"] = float(em_step_gamma_cap)
+        sampler = FeynmanKacEulerMaruyamaSampler(
+            model, proc, cfg,
+            beta=float(fkc_beta),
+            num_particles=int(fkc_num_particles),
+            lambda_profile_name=str(lambda_profile),
+            lambda_zero=float(lambda_zero),
+            lambda_profile_normalize=str(lambda_normalize),
+            resampling_policy=str(fkc_resampling_policy),
+            ess_threshold_fraction=float(fkc_ess_threshold_fraction),
+            final_resample=bool(fkc_final_resample),
+            sc_policy=str(fkc_sc_policy),
+            prior_mode=str(fkc_prior_mode),
+            **fkc_kwargs,
         )
     else:
         raise ValueError(f"unknown sampler_kind={sampler_kind!r}")
@@ -243,3 +271,42 @@ def sample_bits(
         )
     bits = (probs.float() >= 0.5).long()
     return bits
+
+
+@torch.no_grad()
+def sample_bit_particles(
+    cfg,
+    sampler: "FeynmanKacEulerMaruyamaSampler",
+    *,
+    prefix_full: torch.Tensor,   # [B, S] float in {0,1}
+    prefix_mask: torch.Tensor,   # [B, S] bool (True = prompt)
+    num_steps: int,
+    schedule: str = "entropic",
+    entropy_run_dir: Optional[str] = None,
+    sigma_min_override: Optional[float] = None,
+    seed: Optional[int] = None,
+):
+    """Run the FKC particle sampler and return its FKCOutput.
+
+    `out.bits` is [B, K, S] (long 0/1), the post-final-resample target
+    population; `out.pre_resample_bits`, `out.log_weights_final`,
+    `out.ancestors`, and `out.diagnostics` expose proposal coverage and SMC
+    telemetry for maj@K / pass@K reporting and degeneracy diagnostics.
+    """
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        torch.cuda.manual_seed_all(int(seed))
+    B, S = prefix_full.shape
+    use_amp = bool(getattr(cfg.evaluation, "use_amp", True))
+    amp_dtype = torch.bfloat16 if str(getattr(cfg.evaluation, "amp_dtype", "bf16")).startswith("bf") else torch.float16
+    dev = prefix_full.device
+    with torch.autocast(dev.type, enabled=use_amp, dtype=amp_dtype):
+        out = sampler.sample_particles(
+            num_prompts=B, seq_len=S,
+            conditioning_prefix_full=prefix_full, cond_prefix_mask=prefix_mask,
+            num_steps=int(num_steps), schedule=schedule, entropy_run_dir=entropy_run_dir,
+            sigma_min_override=sigma_min_override, seed=seed,
+            guidance_scale=0.0, posterior_temp=1.0, ati_eta=0.0,
+            return_diagnostics=True, progress=False,
+        )
+    return out

@@ -73,6 +73,118 @@ def _valid_sudoku(cells):
     return True
 
 
+def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data_used):
+    """FKC particle evaluation: pass@K / maj@K / per-particle acc + SMC telemetry.
+
+    For each prompt we decode all K particles, then report:
+      * particle_mean_acc : mean over particles of exact-match (per-particle acc)
+      * pass_at_k         : any particle exactly matches the unique solution
+      * maj_at_k          : majority vote over VALID grids matches (invalid grids
+                            never win; ties broken deterministically)
+    plus valid rate, mean distinct solutions/prompt, and ESS/ancestry diagnostics.
+    """
+    from evaluation.tasks._task_common import sample_bit_particles
+
+    K = int(args.num_particles)
+    steps = int(args.steps or getattr(cfg.evaluation, "num_sampling_steps", 180))
+    n_pass = n_maj = 0
+    part_correct = 0
+    part_total = 0
+    n_valid_part = 0
+    distinct_sum = 0
+    min_ess = float("inf")
+    total_resamples = 0
+    uniq_anc = []
+    records = []
+
+    for start in range(0, n, args.batch_size):
+        idxs = list(range(start, min(start + args.batch_size, n)))
+        Bc = len(idxs)
+        x0 = torch.stack([ds[i]["x0"] for i in idxs]).float().to(sampler.device)
+        pm = torch.stack([ds[i]["prefix_mask"] for i in idxs]).to(sampler.device)
+        gt_ids = torch.stack([ds[i]["input_ids"] for i in idxs]).to(sampler.device)
+
+        out = sample_bit_particles(
+            cfg, sampler, prefix_full=x0, prefix_mask=pm, num_steps=steps,
+            schedule=args.schedule, entropy_run_dir=str(run_dir),
+            sigma_min_override=args.sigma_min, seed=args.seed,
+        )
+        S = x0.shape[1]
+        gen_ids = bits_to_token_ids(out.bits.reshape(Bc * K, S), bpt).reshape(Bc, K, -1)  # [B,K,180]
+        gt_suffix = gt_ids[:, PROMPT_LEN_TOKENS:].cpu()
+
+        d = out.diagnostics
+        summ = d.as_summary()
+        if summ["min_ess"] is not None:
+            min_ess = min(min_ess, summ["min_ess"])
+        total_resamples += summ["num_resample_events"]
+        if summ["final_unique_ancestors"] is not None:
+            uniq_anc.extend(summ["final_unique_ancestors"])
+
+        for b, gi in enumerate(idxs):
+            gt = gt_suffix[b].tolist()
+            suffixes = []          # decoded solution suffix per particle
+            valid_suffixes = []
+            any_exact = False
+            for k in range(K):
+                row = gen_ids[b, k].cpu().tolist()
+                suffix = row[PROMPT_LEN_TOKENS:]
+                suffixes.append(tuple(suffix))
+                sol_cells, _ = _grid_cells(row, GRID_START_SOLUTION)
+                exact = (suffix == gt)
+                any_exact = any_exact or exact
+                part_correct += int(exact)
+                part_total += 1
+                if _valid_sudoku(sol_cells):
+                    n_valid_part += 1
+                    valid_suffixes.append(tuple(suffix))
+            n_pass += int(any_exact)
+            distinct_sum += len(set(suffixes))
+            # majority vote among valid grids (invalid never win; deterministic tie-break)
+            maj_ok = False
+            if valid_suffixes:
+                from collections import Counter
+                counts = Counter(valid_suffixes)
+                top = max(counts.items(), key=lambda kv: (kv[1], [-c for c in kv[0]]))
+                maj_ok = (list(top[0]) == gt)
+            n_maj += int(maj_ok)
+            if len(records) < 50:
+                records.append({"idx": gi, "pass": bool(any_exact), "maj": bool(maj_ok),
+                                "distinct": len(set(suffixes))})
+
+        done = min(start + args.batch_size, n)
+        print(f"[sudoku-fkc] {done}/{n}  pass@{K}={n_pass} ({100.0*n_pass/max(1,done):.1f}%)  "
+              f"maj@{K}={n_maj} ({100.0*n_maj/max(1,done):.1f}%)  min_ess={min_ess:.2f}", flush=True)
+
+    result = {
+        "task": "sudoku", "difficulty": cfg.data.difficulty,
+        "checkpoint": str(args.checkpoint), "sampler_kind": args.sampler_kind,
+        "beta": args.beta, "num_particles": K, "steps": steps,
+        "lambda_zero": args.lambda_zero, "lambda_profile": args.lambda_profile,
+        "lambda_normalize": args.lambda_normalize, "resampling_policy": args.resampling_policy,
+        "ess_threshold": args.ess_threshold, "sc_policy": args.sc_policy,
+        "prior_mode": args.prior_mode, "final_resample": bool(args.final_resample),
+        "ema": bool(args.ema), "sigma_data": sigma_data_used, "num_examples": n,
+        "particle_mean_accuracy": part_correct / max(1, part_total),
+        "pass_at_k": n_pass / max(1, n),
+        "maj_at_k": n_maj / max(1, n),
+        "valid_sudoku_rate": n_valid_part / max(1, part_total),
+        "mean_distinct_solutions": distinct_sum / max(1, n),
+        "min_ess": (None if min_ess == float("inf") else min_ess),
+        "total_resample_events": total_resamples,
+        "mean_final_unique_ancestors": (sum(uniq_anc) / len(uniq_anc)) if uniq_anc else None,
+        "sample_records": records,
+    }
+    tag = (f"{cfg.data.difficulty}_fkc_beta{args.beta:g}_K{K}_s{steps}_lz{args.lambda_zero:g}"
+           f"_{args.lambda_normalize}_{args.resampling_policy}_sc{args.sc_policy}"
+           f"_ess{args.ess_threshold:g}_ema{int(bool(args.ema))}")
+    out_path = out_dir / f"sudoku_results_{tag}.json"
+    out_path.write_text(json.dumps(result, indent=2))
+    print("\n=== SUDOKU FKC RESULT ===")
+    print(json.dumps({k: v for k, v in result.items() if k != "sample_records"}, indent=2))
+    print(f"saved -> {out_path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -80,8 +192,9 @@ def main():
     ap.add_argument("--difficulty", default=None, help="override (else from config/env)")
     ap.add_argument("--sampler", default="stochastic", choices=["stochastic", "deterministic"],
                     help="stochastic => EDM-style churn (needs gamma>0); deterministic => no churn")
-    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun", "em", "pc"],
-                    help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation")
+    ap.add_argument("--sampler_kind", default="ddim", choices=["ddim", "heun", "em", "pc", "fkc_em"],
+                    help="ddim = CoBit ddim_entropic headline path (EDM churn); heun = 2nd-order ablation; "
+                         "fkc_em = Feynman-Kac SMC sampler for the tempered target p^beta")
     ap.add_argument("--schedule", default="entropic", choices=["entropic", "karras"],
                     help="sigma grid; entropic = trained entropy-rate schedule")
     ap.add_argument("--gamma", type=float, default=0.0, help="churn gamma; 0 => deterministic")
@@ -126,6 +239,21 @@ def main():
     ap.add_argument("--score_temp_clean_var", type=float, default=0.25,
                     help="Track A1 clean-bit variance v (default 0.25 = Var of ideal 0/1 bits, mean 0.5). "
                          "This is NOT the EDM preconditioning sigma_data; keep it separate.")
+    # ---- FKC (sampler_kind=fkc_em): Feynman-Kac SMC for the tempered target p^beta ----
+    ap.add_argument("--beta", type=float, default=1.0,
+                    help="FKC tempering exponent (>=1). beta=1 is the untempered base (K=1 == EM). "
+                         "log-weight is extensive in free bits, so keep beta-1 SMALL (Sudoku has 356 "
+                         "free bits): sweep {1.0,1.02,1.05,1.1,1.25,1.5,2.0}.")
+    ap.add_argument("--num_particles", type=int, default=8, help="FKC particle count K per prompt.")
+    ap.add_argument("--ess_threshold", type=float, default=0.5,
+                    help="FKC resample when ESS < ess_threshold * K (fraction).")
+    ap.add_argument("--resampling_policy", default="ess", choices=["ess", "every_step_active", "never"])
+    ap.add_argument("--sc_policy", default="inherit", choices=["inherit", "zero", "stateless_two_pass"],
+                    help="FKC self-conditioning policy. inherit = carry D_k as particle state (headline).")
+    ap.add_argument("--final_resample", type=int, default=1, help="FKC mandatory final resample (1/0).")
+    ap.add_argument("--prior_mode", default="sampler_gaussian",
+                    choices=["sampler_gaussian", "forward_marginal_diag"],
+                    help="FKC tempered prior variance: sigma_max^2/beta (default) or (sigma_max^2+v)/beta.")
     ap.add_argument("--out_dir", default=None)
     ap.add_argument("--allow_cpu", action="store_true",
                     help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
@@ -160,13 +288,21 @@ def main():
         cfg, args.checkpoint, device, apply_ema=bool(args.ema), sampler_kind=args.sampler_kind,
         lambda_zero=args.lambda_zero, lambda_profile=args.lambda_profile,
         lambda_normalize=args.lambda_normalize, guidance_mode=args.guidance_mode,
-        em_step_gamma_cap=args.em_step_gamma_cap)
+        em_step_gamma_cap=args.em_step_gamma_cap,
+        fkc_beta=args.beta, fkc_num_particles=args.num_particles,
+        fkc_resampling_policy=args.resampling_policy,
+        fkc_ess_threshold_fraction=args.ess_threshold,
+        fkc_final_resample=bool(args.final_resample),
+        fkc_sc_policy=args.sc_policy, fkc_prior_mode=args.prior_mode)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 
     ds = SudokuDataset(cfg, split="val")
     n = len(ds) if args.limit is None else min(args.limit, len(ds))
     bpt = BITS_PER_TOKEN
+
+    if args.sampler_kind in {"fkc_em", "fkc"}:
+        return _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data_used)
 
     n_exact = 0
     n_grid = 0
