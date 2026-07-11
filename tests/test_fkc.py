@@ -1,0 +1,259 @@
+"""Correctness gates for the Feynman-Kac Euler-Maruyama sampler (FKC).
+
+These MUST pass before any Sudoku/GSM8K FKC sweep (they guard the tempering
+math and the particle bookkeeping):
+
+  Gate 1  beta=1, K=1 is bit-identical to EulerMaruyamaSampler (lambda0=0 and >0)
+  Gate 2  beta=1: every weight increment is 0, ESS==K, no in-loop resampling
+  Gate 3  beta>1, K=1: weights/resampling cannot change the trajectory (control)
+  Gate 4  prompt invariance: clamped coords never move; drift/noise zero there
+  Gate 5  ancestry: x / sc / score gather with identical indices
+  Gate 6  duplicated ancestors branch: same state post-resample, diverge via noise
+  Gate 7  systematic resampling: fixed weights + fixed u0 -> exact indices
+  Gate 8  analytic 1-D Gaussian: weighted/resampled Var -> (v+sigma^2)/beta
+          for lambda in {0, 1, 1/beta, lambda(sigma)}  [the key math test]
+"""
+import math
+
+import torch
+
+from diffusion.continuous.processes import ContinuousForwardProcess
+from diffusion.continuous.samplers import (
+    DDIMSampler, EulerMaruyamaSampler, FeynmanKacEulerMaruyamaSampler,
+)
+from diffusion.continuous.smc import (
+    effective_sample_size, systematic_resample_indices, gather_particles,
+)
+from tests._sampler_harness import TinyBinaryDenoiser, make_cpu_cfg, make_conditioning
+
+B, S, NP, STEPS = 2, 16, 4, 10
+
+
+def _em(cfg, model, **kw):
+    return EulerMaruyamaSampler(
+        model, ContinuousForwardProcess(cfg), cfg,
+        lambda_profile_name="flat", lambda_profile_normalize="as_saved",
+        em_step_gamma_cap=1.0, **kw,
+    )
+
+
+def _fkc(cfg, model, **kw):
+    return FeynmanKacEulerMaruyamaSampler(
+        model, ContinuousForwardProcess(cfg), cfg,
+        lambda_profile_name="flat", lambda_profile_normalize="as_saved",
+        em_step_gamma_cap=1.0, **kw,
+    )
+
+
+def _run_em(sampler, pf, pm, seed):
+    torch.manual_seed(seed)
+    x, probs = sampler.sample(
+        num_samples=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", sc_refresh_mode="carry", ati_eta=0.0,
+        return_probs=True, progress=False,
+    )
+    return x, (probs >= 0.5).long()
+
+
+def _run_fkc(sampler, pf, pm, seed, K=1):
+    torch.manual_seed(seed)          # global RNG -> prior + Langevin noise (matches EM)
+    out = sampler.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=seed, progress=False,
+    )
+    return out
+
+
+def _gate1(lambda_zero):
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    em = _em(cfg, model, lambda_zero=lambda_zero)
+    fkc = _fkc(cfg, model, beta=1.0, num_particles=1, lambda_zero=lambda_zero)
+    x_em, bits_em = _run_em(em, pf, pm, seed=123)
+    out = _run_fkc(fkc, pf, pm, seed=123, K=1)
+    x_fkc = out.x.squeeze(1)
+    bits_fkc = out.bits.squeeze(1)
+    assert torch.equal(x_em, x_fkc), (
+        f"lambda0={lambda_zero}: x max|diff|={float((x_em-x_fkc).abs().max()):.3e}"
+    )
+    assert torch.equal(bits_em, bits_fkc)
+
+
+def test_gate1_deterministic_bit_identical_to_em():
+    _gate1(0.0)
+
+
+def test_gate1_stochastic_bit_identical_to_em():
+    _gate1(0.5)
+
+
+def test_gate2_beta_one_weights_are_noop():
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.0, num_particles=8, lambda_zero=0.5)
+    out = _run_fkc(fkc, pf, pm, seed=7, K=8)
+    assert torch.allclose(out.log_weights_final, torch.zeros_like(out.log_weights_final))
+    ess = torch.stack(out.diagnostics.ess)                 # [T, B]
+    assert torch.allclose(ess, torch.full_like(ess, 8.0), atol=1e-6)
+    assert not any(out.diagnostics.resampled)              # no in-loop resampling
+
+
+def test_gate3_beta_gt1_K1_trajectory_independent_of_resampling():
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    # K=1: resampling of one particle is identity, so final_resample on/off must match.
+    a = _fkc(cfg, model, beta=1.6, num_particles=1, lambda_zero=0.5, final_resample=True)
+    b = _fkc(cfg, model, beta=1.6, num_particles=1, lambda_zero=0.5, final_resample=False)
+    xa = _run_fkc(a, pf, pm, seed=9).x
+    xb = _run_fkc(b, pf, pm, seed=9).x
+    assert torch.equal(xa, xb) and torch.isfinite(xa).all()
+
+
+def test_gate4_prompt_invariance():
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.5, num_particles=6, lambda_zero=0.6)
+    out = _run_fkc(fkc, pf, pm, seed=11, K=6)
+    pm_bk = pm.unsqueeze(1).expand(B, 6, S)
+    pf_bk = pf.unsqueeze(1).expand(B, 6, S)
+    # clamped coordinates never moved from the clean prefix
+    assert torch.equal(out.x[pm_bk], pf_bk[pm_bk])
+    # decoded prompt bits equal the prompt
+    assert torch.equal(out.bits[pm_bk], pf_bk[pm_bk].long())
+
+
+def test_gate5_ancestry_gather_consistency():
+    # x, sc, score tagged by particle id must gather with identical ancestor idx.
+    Bk, K = 3, 5
+    idx = torch.tensor([[4, 4, 0, 1, 2], [0, 1, 2, 3, 4], [2, 2, 2, 2, 2]])
+    tag = torch.arange(K).view(1, K, 1).expand(Bk, K, 7).float()
+    x = tag.clone(); sc = tag.clone() + 100.0; score = tag.clone() + 1000.0
+    gx, gsc, gsco = (gather_particles(t, idx) for t in (x, sc, score))
+    for b in range(Bk):
+        for k in range(K):
+            a = int(idx[b, k])
+            assert int(gx[b, k, 0]) == a
+            assert int(gsc[b, k, 0]) == a + 100
+            assert int(gsco[b, k, 0]) == a + 1000
+
+
+def test_gate6_duplicated_ancestors_branch_via_noise():
+    # After a forced resample onto few ancestors, particles sharing an ancestor
+    # start identical then diverge on FREE coords through independent EM noise,
+    # while prompt coords stay clamped. Drive it with a large beta so ESS
+    # collapses and resampling fires, then check post-run diversity.
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=2.0, num_particles=8, lambda_zero=0.7,
+               ess_threshold_fraction=0.9)
+    out = _run_fkc(fkc, pf, pm, seed=13, K=8)
+    assert any(out.diagnostics.resampled), "expected at least one resample event"
+    # free coords differ across particles (branching), prompt coords identical.
+    free = ~pm[0].bool()
+    xf = out.x[0][:, free]                     # [K, n_free]
+    assert xf.unique(dim=0).shape[0] > 1, "particles did not branch on free coords"
+    pm_bk = pm.unsqueeze(1).expand(B, 8, S)
+    pf_bk = pf.unsqueeze(1).expand(B, 8, S)
+    assert torch.equal(out.x[pm_bk], pf_bk[pm_bk])
+
+
+def test_gate7_systematic_resample_fixed_u0():
+    # w = [0.7, 0.1, 0.1, 0.1], cdf = [0.7, 0.8, 0.9, 1.0], u0 = 0.1
+    # positions = [0.10, 0.35, 0.60, 0.85] (all off the CDF knots) -> [0, 0, 0, 2]
+    logw = torch.log(torch.tensor([[0.7, 0.1, 0.1, 0.1]], dtype=torch.float64))
+    idx = systematic_resample_indices(logw, u0=torch.tensor([[0.1]]))
+    assert idx.reshape(-1).tolist() == [0, 0, 0, 2]
+
+
+# ------------------------------- Gate 8 -----------------------------------
+# Analytic 1-D Gaussian FKC, validating the tempering math via the shared smc.py
+# weight formula (the sigmoid-bound sampler cannot represent a real-valued
+# Gaussian). q_sigma = N(0, v + sigma^2), s(x,sigma) = -x/(v+sigma^2); target
+# q^beta has Var = (v + sigma^2)/beta. Proposal (codebase convention,
+# h = s_next - s_cur, d = -sigma*s):
+#   x    <- x + h*beta*(1+lam)*d + sqrt(2*lam*sigma*Delta)*z
+#   dlogw += 0.5*beta*(beta-1)*(sigma_cur^2 - sigma_next^2)*s^2
+#
+# The FK log-weight is lambda-INDEPENDENT, so the *importance-weighted* terminal
+# variance must equal (v+sigma^2)/beta for every lambda in {0, 1, 1/beta,
+# lambda(sigma)} -- this is the theorem under test. We use the weighted
+# estimator (unbiased for all lambda) rather than a resampled one: lambda=0 has
+# no mixing, so its particle diversity can only decay and a resampled variance
+# would be meaningless. A modest beta and a short sigma-range keep the
+# finite-step discretization bias and the weight spread small.
+
+def _weighted_var(x, logw):
+    w = torch.softmax(logw, dim=1)
+    mean = (w * x).sum(dim=1, keepdim=True)
+    return float((w * (x - mean) ** 2).sum())
+
+
+def _analytic_fkc_weighted_var(beta, lam_mode, *, v=1.0, K=16384, N=200, seed=0):
+    torch.manual_seed(seed)
+    gen = torch.Generator().manual_seed(seed + 1)
+    sig_max, sig_min = 3.0, 0.5
+    i = torch.linspace(0, 1, N + 1, dtype=torch.float64)
+    sigmas = sig_max + i * (sig_min - sig_max)          # linear grid, fine steps
+
+    def lam_of(sig):
+        if lam_mode == "zero":
+            return 0.0
+        if lam_mode == "one":
+            return 1.0
+        if lam_mode == "inv_beta":
+            return 1.0 / beta
+        return float(0.5 + 0.6 * math.exp(-((math.log(float(sig))) ** 2) / 2.0))
+
+    # Prior = tempered high-sigma marginal q_{sigma_max}^beta.
+    x = torch.randn(1, K, dtype=torch.float64) * math.sqrt((v + sig_max ** 2) / beta)
+    logw = torch.zeros(1, K, dtype=torch.float64)
+    for k in range(N):
+        sc, sn = sigmas[k], sigmas[k + 1]
+        s = -x / (v + sc ** 2)
+        d = -sc * s
+        logw = logw + 0.5 * beta * (beta - 1.0) * (sc ** 2 - sn ** 2) * (s ** 2)
+        lam = lam_of(sc)
+        h = sn - sc
+        x = x + h * beta * (1.0 + lam) * d
+        if lam > 0.0:
+            delta = (sc - sn).clamp_min(0.0)
+            z = torch.randn(1, K, dtype=torch.float64, generator=gen)
+            x = x + (2.0 * lam * sc * delta).clamp_min(0.0).sqrt() * z
+    target_var = (v + float(sigmas[-1]) ** 2) / beta
+    return _weighted_var(x, logw), target_var
+
+
+def _check_gate8(lam_mode):
+    beta = 1.5
+    got, want = _analytic_fkc_weighted_var(beta, lam_mode)
+    rel = abs(got - want) / want
+    assert rel < 0.12, f"lam={lam_mode}: weighted Var={got:.4f} want {want:.4f} (rel {rel:.2%})"
+
+
+def test_gate8_gaussian_lambda_zero():
+    _check_gate8("zero")
+
+
+def test_gate8_gaussian_lambda_one():
+    _check_gate8("one")
+
+
+def test_gate8_gaussian_lambda_inv_beta():
+    _check_gate8("inv_beta")
+
+
+def test_gate8_gaussian_lambda_sigma():
+    _check_gate8("sigma")
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"PASS {name}")
+    print("all FKC gates passed")

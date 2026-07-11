@@ -512,6 +512,34 @@ def _score_from_probs(
     return (probs_f - x_f) / sigma2
 
 
+def _score_temp_kappa(
+    sigma: torch.Tensor,
+    tau: float,
+    clean_var: float,
+    *,
+    ndim: int,
+) -> torch.Tensor:
+    """Track A1 local score-temperature multiplier.
+
+        kappa(sigma) = (v + sigma^2) / (tau * v + sigma^2),   v = clean_var
+
+    Under a locally-Gaussian clean model N(mu, v I) the marginal at noise sigma is
+    N(mu, (v+sigma^2) I); sharpening the clean component to variance tau*v (tau<1)
+    rescales the *available* score exactly by kappa. kappa -> 1 at high sigma (mode
+    allocation untouched) and kappa -> 1/tau as sigma -> 0 (late sharpening only),
+    unlike a constant logit scaling. tau == 1 => kappa == 1 (bit-identical no-op).
+
+    Returns a float32 tensor broadcastable against a drift/score tensor of rank
+    `ndim` ([B,S] binary or [B,S,V] token); sigma may be 0-dim (shared) or [B].
+    """
+    s2 = sigma.to(torch.float32) ** 2
+    v = float(clean_var)
+    kappa = (v + s2) / (float(tau) * v + s2)
+    if kappa.dim() == 0:
+        return kappa
+    return kappa.view(*([kappa.shape[0]] + [1] * (ndim - 1)))
+
+
 def _build_mask_conditioning(
     *,
     cfg,
@@ -1648,9 +1676,21 @@ class DDIMSampler:
         posterior_temp_space: str = "bit",
         codeword_vocab_size: Optional[int] = None,
         codeword_topk: Optional[int] = None,
+        score_temp_tau: float = 1.0,
+        score_temp_clean_var: float = 0.25,
     ):
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
+
+        # Track A1: local score-level temperature. kappa(sigma) rescales the PF-ODE
+        # score/drift to sharpen the locally-Gaussian clean posterior to variance
+        # tau*v (tau<1). Applied to the drift only; the base posterior probs/x0_hat
+        # is left untouched for self-conditioning, decoding, and entropy diagnostics.
+        # tau == 1.0 is a bit-identical no-op.
+        score_temp_tau = float(score_temp_tau)
+        if score_temp_tau <= 0.0:
+            raise ValueError(f"score_temp_tau must be > 0, got {score_temp_tau}")
+        apply_score_temp = abs(score_temp_tau - 1.0) > 1e-8
 
         def _temp_at(sigma_val) -> float:
             return _posterior_temp_at(
@@ -1824,6 +1864,10 @@ class DDIMSampler:
                 )
                 d_cur = -sigma_state * score_cur
                 _zero_mask_(d_cur, prefix_mask)
+                if apply_score_temp:
+                    d_cur = d_cur * _score_temp_kappa(
+                        sigma_state, score_temp_tau, score_temp_clean_var, ndim=d_cur.dim()
+                    )
 
                 x = self._integrate_step(
                     x_state, h, d_cur,
@@ -1902,6 +1946,10 @@ class DDIMSampler:
                 )
                 d_cur = -sigma_state * score_cur
                 _zero_mask_(d_cur, prefix_mask)
+                if apply_score_temp:
+                    d_cur = d_cur * _score_temp_kappa(
+                        sigma_state, score_temp_tau, score_temp_clean_var, ndim=d_cur.dim()
+                    )
 
                 x = self._integrate_step(
                     x_state, h, d_cur,
@@ -2432,5 +2480,349 @@ class PredictorCorrectorSampler(DDIMSampler):
                     null_full=null_full, cond_enabled=cond_enabled, guidance_scale=w_pred, B=B)
                 return x, probs_final
             return x
+        finally:
+            self._current_profile = None
+
+
+class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
+    """Feynman-Kac corrector sampler for the tempered target pi_beta ~ p_theta^beta.
+
+    Realises global tempering exactly (in the continuous-time, exact-score,
+    Markov-score limit) by running K weighted particles per prompt on the
+    entropy-gated reverse-SDE proposal and resampling toward the FKC potential.
+    In reverse variance time u = sigma^2 the base CoBit family is
+
+        dX = (1+lambda)/2 s du + sqrt(lambda) dW,
+
+    and the FKC proposal for rho_u ~ q_u^beta scales the ENTIRE drift by beta,
+    leaves the diffusion noise unchanged, and weights with the UNSCALED score
+    restricted to free (non-prompt) coordinates:
+
+        dX      = beta (1+lambda) sigma s dr + sqrt(2 lambda sigma) dW_r
+        dlog w  = 1/2 beta(beta-1) ||s||^2_free du.
+
+    Discrete step (codebase convention, h = sigma_next - sigma_cur < 0,
+    d = -sigma s, Delta = sigma_cur - sigma_next > 0):
+
+        X_{k+1}    = X_k + h beta (1+lambda_k) d_k + sqrt(2 lambda_k sigma_k Delta_k) z
+        dlog w_k   = 1/2 beta(beta-1) (sigma_k^2 - sigma_{k+1}^2) ||s_k||^2_free.
+
+    The weight is lambda-independent (the lambda terms cancel in the weighted
+    Fokker-Planck equation, requiring lambda = lambda(sigma) only -> flat /
+    entropy_rate profiles). At beta=1, K=1 the proposal is bit-identical to
+    EulerMaruyamaSampler (Gate 1); the Langevin noise uses the GLOBAL RNG exactly
+    as EM does, while resampling draws come from a dedicated generator so they
+    never perturb the noise stream.
+
+    Self-conditioning is treated as particle state (carry-mode `inherit`): the
+    ordinary base posterior D_k is the next SC input and is resampled together
+    with X. `zero` / `stateless_two_pass` policies exist for theory validation.
+
+    v1 is intentionally restricted (binary repr, no CFG, posterior_temp=1,
+    ati_eta=0, EDM churn disabled, lambda in {flat, entropy_rate}); unsupported
+    combinations raise loudly rather than silently doing something ambiguous.
+    """
+
+    def __init__(
+        self,
+        model,
+        forward_process,
+        cfg,
+        *,
+        beta: float = 1.0,
+        num_particles: int = 8,
+        lambda_profile_name: str = "entropy_rate",
+        lambda_zero: float = 0.0,
+        lambda_profile_normalize: str = "as_saved",
+        em_step_gamma_cap: Optional[float] = 1.0,
+        resampling_policy: str = "ess",
+        ess_threshold_fraction: float = 0.5,
+        final_resample: bool = True,
+        sc_policy: str = "inherit",
+        prior_mode: str = "sampler_gaussian",
+        clean_bit_variance: float = 0.25,
+    ):
+        super().__init__(model, forward_process, cfg)
+        if float(beta) < 1.0:
+            raise ValueError(f"beta must be >= 1, got {beta}")
+        if int(num_particles) < 1:
+            raise ValueError(f"num_particles must be >= 1, got {num_particles}")
+        if float(lambda_zero) < 0.0:
+            raise ValueError(f"lambda_zero must be >= 0, got {lambda_zero}")
+        if str(resampling_policy) not in {"ess", "every_step_active", "never"}:
+            raise ValueError(f"unknown resampling_policy={resampling_policy!r}")
+        if str(sc_policy) not in {"inherit", "zero", "stateless_two_pass"}:
+            raise ValueError(f"unknown sc_policy={sc_policy!r}")
+        if str(prior_mode) not in {"sampler_gaussian", "forward_marginal_diag"}:
+            raise ValueError(f"unknown prior_mode={prior_mode!r}")
+        self.beta = float(beta)
+        self.num_particles = int(num_particles)
+        self.lambda_profile_name = str(lambda_profile_name)
+        self.lambda_zero = float(lambda_zero)
+        self.lambda_profile_normalize = str(lambda_profile_normalize)
+        self.em_step_gamma_cap = None if em_step_gamma_cap is None else float(em_step_gamma_cap)
+        self.resampling_policy = str(resampling_policy)
+        self.ess_threshold_fraction = float(ess_threshold_fraction)
+        self.final_resample = bool(final_resample)
+        self.sc_policy = str(sc_policy)
+        self.prior_mode = str(prior_mode)
+        self.clean_bit_variance = float(clean_bit_variance)
+        self._current_profile = None
+
+    # Reuse EM's profile construction verbatim.
+    _build_profile = EulerMaruyamaSampler._build_profile
+
+    def _validate_fkc_settings(self, *, guidance_scale, posterior_temp, ati_eta):
+        if self.is_cont_tokens:
+            raise ValueError("FKC v1 supports binary representation only.")
+        if guidance_scale is not None and float(guidance_scale) > 0.0:
+            raise ValueError("FKC v1 does not support classifier-free guidance (guidance_scale must be 0).")
+        if abs(float(posterior_temp) - 1.0) > 1e-8:
+            raise ValueError("FKC v1 requires posterior_temp == 1.0.")
+        if ati_eta is not None and float(ati_eta) != 0.0:
+            raise ValueError("FKC v1 requires ati_eta == 0.0.")
+        st = getattr(getattr(self.cfg, "evaluation", object()), "stochastic", None)
+        if st is not None and bool(getattr(st, "enabled", False)) and float(getattr(st, "s_churn", 0.0)) > 0.0:
+            raise ValueError(
+                "FKC does not support EDM-style churn; set cfg.evaluation.stochastic.enabled=False. "
+                "Stochasticity is owned by lambda_zero / the LambdaProfile."
+            )
+        name = self.lambda_profile_name.lower().strip()
+        if name not in {"flat", "constant", "entropy_rate", "entropy-rate", "er", "entropy"}:
+            raise ValueError(f"FKC v1 lambda_profile must be flat or entropy_rate, got {name!r}.")
+
+    def _denoise_binary(self, x_flat, sigma_scalar, sc_flat):
+        """Base per-bit posterior D = sigmoid(postprocessed logit), [N, S] -> [N, S]."""
+        N = x_flat.shape[0]
+        sig = sigma_scalar.to(x_flat.device).reshape(()).expand(N)
+        logits = _model_logits_continuous(
+            self.model, self.cfg, x_flat, sig, sc_flat,
+            posterior_temp=1.0, posterior_temp_target="learned", pt_ctx=None,
+        )
+        return logits_to_x0_hat(logits, dtype=x_flat.dtype, is_cont_tokens=False)
+
+    def _sc_posterior(self, x_flat, sigma_scalar, sc_flat_carry):
+        """Return the base posterior used for the score, honouring sc_policy.
+
+        inherit             : model(x, sigma, sc_carry)                 (1 NFE)
+        zero                : model(x, sigma, 0)                        (1 NFE)
+        stateless_two_pass  : model(x, sigma, detach(model(x,sigma,0))) (2 NFE)
+        """
+        if not self.sc_enabled or self.sc_policy == "zero":
+            return self._denoise_binary(x_flat, sigma_scalar, torch.zeros_like(x_flat))
+        if self.sc_policy == "stateless_two_pass":
+            d1 = self._denoise_binary(x_flat, sigma_scalar, torch.zeros_like(x_flat))
+            return self._denoise_binary(x_flat, sigma_scalar, d1.detach())
+        # inherit
+        return self._denoise_binary(x_flat, sigma_scalar, sc_flat_carry)
+
+    @torch.no_grad()
+    def sample_particles(
+        self,
+        *,
+        num_prompts: int,
+        seq_len: int,
+        conditioning_prefix_full: torch.Tensor,
+        cond_prefix_mask: torch.Tensor,
+        num_steps: Optional[int] = None,
+        schedule: Optional[str] = None,
+        entropy_run_dir: Optional[Path] = None,
+        sigma_min_override: Optional[float] = None,
+        sigma_max_override: Optional[float] = None,
+        seed: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        posterior_temp: float = 1.0,
+        ati_eta: float = 0.0,
+        return_diagnostics: bool = True,
+        progress: bool = False,
+    ):
+        from diffusion.continuous.smc import (
+            FKCOutput, SMCDiagnostics, effective_sample_size,
+            systematic_resample_indices, gather_particles, unique_ancestor_count,
+        )
+
+        self._validate_fkc_settings(
+            guidance_scale=guidance_scale, posterior_temp=posterior_temp, ati_eta=ati_eta,
+        )
+
+        B = int(num_prompts)
+        K = int(self.num_particles)
+        S = int(seq_len)
+        beta = self.beta
+        dev = self.device
+
+        # Dedicated generator for resampling draws (isolated from the global RNG
+        # used for Langevin noise, so resampling never perturbs the noise stream).
+        gen = torch.Generator(device=dev)
+        gen.manual_seed(int(seed) if seed is not None else 0)
+
+        sigmas = self.sigmas.prepare(
+            schedule=schedule, num_steps=num_steps, entropy_run_dir=entropy_run_dir,
+            sigma_min_override=sigma_min_override, sigma_max_override=sigma_max_override,
+        )
+        self._current_profile = self._build_profile(entropy_run_dir)
+        try:
+            sigma0 = sigmas[0]
+
+            # Conditioning: prefix_full/mask come back [B, S]; broadcast to [B, K, S].
+            cond_enabled, prefix_full, prefix_mask, _null = _build_mask_conditioning(
+                cfg=self.cfg, B=B, S=S, device=dev,
+                conditioning_prefix_full=conditioning_prefix_full,
+                cond_prefix_mask=cond_prefix_mask,
+                conditioning_prefix=None, cond_len_bits=None,
+                is_cont_tokens=False, vocab_size=self.vocab_size,
+            )
+            pf = prefix_full.unsqueeze(1).expand(B, K, S).contiguous()
+            pm = prefix_mask.unsqueeze(1).expand(B, K, S).contiguous()
+            pm_flat = pm.reshape(B * K, S)
+            num_free = (~prefix_mask).sum(dim=-1).to(torch.float64).clamp_min(1.0)  # [B]
+
+            # Tempered prior on free coords: var = sigma_max^2 / beta (sampler_gaussian)
+            # or (sigma_max^2 + v)/beta (forward_marginal_diag). GLOBAL RNG (matches
+            # DDIM/EM prior draw order so beta=1,K=1 is bit-identical).
+            eps = torch.randn(B, K, S, device=dev, dtype=torch.float32)
+            if self.prior_mode == "forward_marginal_diag":
+                prior_var = (float(sigma0) ** 2 + self.clean_bit_variance) / beta
+            else:
+                prior_var = (float(sigma0) ** 2) / beta
+            x = self.data_center + math.sqrt(prior_var) * eps
+            if cond_enabled:
+                _clamp_mask_(x, pf, pm)
+
+            # Self-conditioning particle state (zeros, prompt clamped to clean prefix).
+            sc = torch.zeros_like(x)
+            if cond_enabled:
+                _clamp_mask_(sc, pf, pm)
+
+            logw = torch.zeros(B, K, dtype=torch.float64, device=dev)
+            ancestors = torch.arange(K, device=dev).unsqueeze(0).expand(B, K).contiguous()
+            diag = SMCDiagnostics()
+
+            steps = range(len(sigmas) - 1)
+            if progress:
+                steps = tqdm(steps, desc="FKC-EM", leave=False)
+
+            for i in steps:
+                sigma_cur, sigma_next = sigmas[i], sigmas[i + 1]
+
+                if cond_enabled:
+                    _clamp_mask_(x, pf, pm)
+                    _clamp_mask_(sc, pf, pm)
+
+                x_flat = x.reshape(B * K, S)
+                sc_flat = sc.reshape(B * K, S)
+                probs_flat = self._sc_posterior(x_flat, sigma_cur, sc_flat)     # D_k [N,S]
+                probs = probs_flat.reshape(B, K, S)
+                if cond_enabled:
+                    _clamp_mask_(probs, pf, pm)
+
+                score_flat = _score_from_probs(
+                    probs.reshape(B * K, S), x_flat, sigma_cur, is_cont_tokens=False,
+                )                                                              # [N,S]
+                d = (-sigma_cur * score_flat).reshape(B, K, S)
+                _zero_mask_(d, pm)
+                score = score_flat.reshape(B, K, S)
+
+                # ---- FKC log-weight increment (unscaled score, free coords) ----
+                score_free = score.clone()
+                _zero_mask_(score_free, pm)
+                dsig2 = float(sigma_cur) ** 2 - float(sigma_next) ** 2
+                snorm2 = score_free.to(torch.float64).square().sum(dim=-1)      # [B,K]
+                dlogw = 0.5 * beta * (beta - 1.0) * dsig2 * snorm2
+                if not torch.isfinite(dlogw).all():
+                    raise FloatingPointError(
+                        f"FKC weight increment non-finite at step {i}, sigma={float(sigma_cur):.4g}"
+                    )
+                logw = logw + dlogw
+
+                # ---- lambda for this step (entropy-gated) ----
+                lam = self._current_profile.evaluate(sigma_cur, state=x_flat)
+                delta = (sigma_cur - sigma_next).clamp_min(0.0)
+                if self.em_step_gamma_cap is not None and float(self.lambda_zero) > 0.0:
+                    lam_cap = self.em_step_gamma_cap * sigma_cur / delta.clamp_min(1e-12)
+                    lam = torch.minimum(lam, lam_cap)
+                lam_active = bool(float(self.lambda_zero) > 0.0 and float(lam) > 0.0)
+
+                # ---- ESS + resampling BEFORE propagation (only where lambda>0) ----
+                ess = effective_sample_size(logw)                              # [B]
+                do_group = torch.zeros(B, dtype=torch.bool, device=dev)
+                if lam_active and self.resampling_policy != "never":
+                    if self.resampling_policy == "every_step_active":
+                        do_group[:] = True
+                    else:  # ess
+                        do_group = ess < (self.ess_threshold_fraction * K)
+                resampled_now = bool(do_group.any().item())
+                if resampled_now:
+                    idx = systematic_resample_indices(logw, generator=gen)      # [B,K]
+                    keep = torch.arange(K, device=dev).unsqueeze(0).expand(B, K)
+                    idx = torch.where(do_group.unsqueeze(1), idx, keep)
+                    x = gather_particles(x, idx)
+                    sc = gather_particles(sc, idx)
+                    probs = gather_particles(probs, idx)
+                    d = gather_particles(d, idx)
+                    ancestors = gather_particles(ancestors, idx)
+                    logw = torch.where(do_group.unsqueeze(1), torch.zeros_like(logw), logw)
+
+                # ---- EM proposal: beta-scaled full drift, noise unchanged ----
+                h = sigma_next - sigma_cur
+                if float(self.lambda_zero) == 0.0:
+                    x = x + h * beta * d
+                else:
+                    x_det = x + h * beta * (1.0 + lam) * d
+                    z = torch.randn_like(x)                                     # GLOBAL RNG
+                    _zero_mask_(z, pm)
+                    noise = (2.0 * lam * sigma_cur * delta).clamp_min(0.0).sqrt()
+                    x = x_det + noise * z
+
+                if cond_enabled:
+                    _clamp_mask_(x, pf, pm)
+                sc = probs  # carry base posterior as next SC (inherit); resampled above
+
+                if return_diagnostics:
+                    diag.sigmas.append(float(sigma_cur))
+                    diag.ess.append(ess.detach().cpu())
+                    diag.resampled.append(resampled_now)
+                    nw = torch.softmax(logw, dim=1)
+                    diag.max_weight.append(nw.max(dim=1).values.detach().cpu())
+                    diag.potential_per_free_bit.append((snorm2 / num_free.unsqueeze(1)).detach().cpu())
+                    if resampled_now:
+                        diag.unique_ancestors.append(unique_ancestor_count(idx).detach().cpu())
+
+            # ---- pre-final-resample population (proposal coverage) ----
+            if cond_enabled:
+                _clamp_mask_(x, pf, pm)
+                _clamp_mask_(sc, pf, pm)
+            sigma_final = sigmas[-1]
+            pre_probs = self._sc_posterior(
+                x.reshape(B * K, S), sigma_final, sc.reshape(B * K, S),
+            ).reshape(B, K, S)
+            if cond_enabled:
+                _clamp_mask_(pre_probs, pf, pm)
+            pre_bits = (pre_probs.float() >= 0.5).long()
+            logw_final = logw.clone()
+
+            # ---- mandatory final resample -> unweighted target population ----
+            if self.final_resample:
+                idx = systematic_resample_indices(logw, generator=gen)
+                x = gather_particles(x, idx)
+                sc = gather_particles(sc, idx)
+                ancestors = gather_particles(ancestors, idx)
+                logw = torch.zeros_like(logw)
+
+            if cond_enabled:
+                _clamp_mask_(x, pf, pm)
+                _clamp_mask_(sc, pf, pm)
+            probs_final = self._sc_posterior(
+                x.reshape(B * K, S), sigma_final, sc.reshape(B * K, S),
+            ).reshape(B, K, S)
+            if cond_enabled:
+                _clamp_mask_(probs_final, pf, pm)
+            bits = (probs_final.float() >= 0.5).long()
+
+            return FKCOutput(
+                bits=bits, probs=probs_final, x=x,
+                pre_resample_bits=pre_bits, log_weights_final=logw_final,
+                ancestors=ancestors, diagnostics=diag,
+            )
         finally:
             self._current_profile = None

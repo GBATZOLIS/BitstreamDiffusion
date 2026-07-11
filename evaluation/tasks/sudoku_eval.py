@@ -118,6 +118,14 @@ def main():
                     help="EM only: per-step churn cap gamma_step=lam*Delta/sigma (bounds injected "
                          "noise to <= sqrt(2*cap)*sigma). Unset = sampler default 1.0; RECOMMENDED 0.41 "
                          "(~sqrt(2)-1). See reports/EM_TINYGSM_COLLAPSE_ANALYSIS.md.")
+    ap.add_argument("--score_temp_tau", type=float, default=1.0,
+                    help="Track A1 local score-temperature tau (<1 sharpens). Rescales the PF-ODE "
+                         "score by kappa(sigma)=(v+sigma^2)/(tau*v+sigma^2): ->1 at high sigma, ->1/tau "
+                         "as sigma->0 (late sharpening only). tau=1.0 is a bit-identical no-op. Zero "
+                         "extra NFE; base posterior is untouched for self-conditioning/decoding.")
+    ap.add_argument("--score_temp_clean_var", type=float, default=0.25,
+                    help="Track A1 clean-bit variance v (default 0.25 = Var of ideal 0/1 bits, mean 0.5). "
+                         "This is NOT the EDM preconditioning sigma_data; keep it separate.")
     ap.add_argument("--out_dir", default=None)
     ap.add_argument("--allow_cpu", action="store_true",
                     help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
@@ -180,6 +188,8 @@ def main():
             schedule=schedule, entropy_run_dir=str(run_dir),
             sigma_min_override=args.sigma_min, seed=args.seed,
             guidance_scale=args.guidance_scale,
+            score_temp_tau=args.score_temp_tau,
+            score_temp_clean_var=args.score_temp_clean_var,
         )
         gen_ids = bits_to_token_ids(bits, bpt)                                   # [B,180]
 
@@ -229,6 +239,8 @@ def main():
         "lambda_profile": args.lambda_profile,
         "lambda_normalize": args.lambda_normalize,
         "guidance_mode": args.guidance_mode,
+        "score_temp_tau": args.score_temp_tau,
+        "score_temp_clean_var": args.score_temp_clean_var,
         "sigma_data": sigma_data_used,
         "num_examples": n,
         "exact_match_accuracy": n_exact / max(1, n),
@@ -240,6 +252,8 @@ def main():
         "sample_records": records,
     }
     tag = f"{cfg.data.difficulty}_{args.sampler}_g{args.gamma}_s{steps}_sd{sigma_data_used:.4f}_w{args.guidance_scale:g}_ema{int(bool(args.ema))}"
+    if abs(args.score_temp_tau - 1.0) > 1e-8:
+        tag += f"_tau{args.score_temp_tau:g}"
     if args.sampler_kind != "ddim":
         tag += f"_kind{args.sampler_kind}_lz{args.lambda_zero:g}_{args.lambda_normalize}"
         if args.sampler_kind == "pc":
