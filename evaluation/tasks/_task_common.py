@@ -88,7 +88,8 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
                            fkc_sc_policy: str = "inherit",
                            fkc_prior_mode: str = "sampler_gaussian",
                            fkc_proposal: str = "em",
-                           fkc_churn_gamma: float = 0.0):
+                           fkc_churn_gamma: float = 0.0,
+                           fkc_resample_entropy_frac=None):
     """Return (model, sampler). Applies EMA shadow weights if present.
 
     sampler_kind='ddim' (default) -> DDIMSampler, the CoBit 'ddim_entropic'
@@ -161,6 +162,8 @@ def load_model_and_sampler(cfg, ckpt_path: str, device, *, apply_ema: bool = Tru
             prior_mode=str(fkc_prior_mode),
             proposal=str(fkc_proposal),
             churn_gamma=float(fkc_churn_gamma),
+            resample_entropy_frac=(None if fkc_resample_entropy_frac is None
+                                   else float(fkc_resample_entropy_frac)),
             **fkc_kwargs,
         )
     else:
@@ -289,8 +292,13 @@ def sample_bit_particles(
     entropy_run_dir: Optional[str] = None,
     sigma_min_override: Optional[float] = None,
     seed: Optional[int] = None,
+    guidance_scale: float = 0.0,
 ):
     """Run the FKC particle sampler and return its FKCOutput.
+
+    guidance_scale>0 selects CFG+FKC (Prop 3.1): the target becomes the two-model
+    geometric average q_u^{1-w} q_c^w with w=guidance_scale (requires a checkpoint
+    trained with conditioning dropout so the null/unconditional path is learned).
 
     `out.bits` is [B, K, S] (long 0/1), the post-final-resample target
     population; `out.pre_resample_bits`, `out.log_weights_final`,
@@ -310,7 +318,7 @@ def sample_bit_particles(
             conditioning_prefix_full=prefix_full, cond_prefix_mask=prefix_mask,
             num_steps=int(num_steps), schedule=schedule, entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override, seed=seed,
-            guidance_scale=0.0, posterior_temp=1.0, ati_eta=0.0,
+            guidance_scale=float(guidance_scale), posterior_temp=1.0, ati_eta=0.0,
             return_diagnostics=True, progress=False,
         )
     return out

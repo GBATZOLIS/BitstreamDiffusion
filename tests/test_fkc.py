@@ -209,6 +209,59 @@ def test_gate6_duplicated_ancestors_branch_via_noise():
     assert torch.equal(out.x[pm_bk], pf_bk[pm_bk])
 
 
+def _run_fkc_cfg(sampler, pf, pm, seed, w):
+    torch.manual_seed(seed)
+    return sampler.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=seed, guidance_scale=w, progress=False,
+    )
+
+
+def test_gate9_cfg_w1_reduces_to_plain_conditional():
+    # CFG+FKC at guidance w=1 targets q_u^0 q_c^1 = q_c with zero FKC weight, so it
+    # must be bit-identical to the plain conditional FKC run (guidance off).
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.0, num_particles=4, lambda_zero=0.5)
+    out_plain = _run_fkc(fkc, pf, pm, seed=21, K=4)
+    out_w1 = _run_fkc_cfg(fkc, pf, pm, seed=21, w=1.0)
+    assert torch.equal(out_plain.x, out_w1.x), \
+        f"w=1 x max|diff|={float((out_plain.x-out_w1.x).abs().max()):.3e}"
+    assert torch.equal(out_plain.bits, out_w1.bits)
+    # w=1 leaves FKC weights at zero (beta_w(beta_w-1)=0)
+    assert torch.allclose(out_w1.log_weights_final, torch.zeros_like(out_w1.log_weights_final))
+
+
+def test_gate9b_cfg_w_gt1_runs_and_reweights():
+    # CFG+FKC at w>1 must run, stay finite, respect prompt invariance, and produce
+    # non-uniform FKC weights (||s_c - s_u||^2 potential is active).
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.0, num_particles=6, lambda_zero=0.6)
+    out = _run_fkc_cfg(fkc, pf, pm, seed=23, w=2.0)
+    assert torch.isfinite(out.x).all()
+    pm_bk = pm.unsqueeze(1).expand(B, 6, S)
+    pf_bk = pf.unsqueeze(1).expand(B, 6, S)
+    assert torch.equal(out.x[pm_bk], pf_bk[pm_bk])                 # prompt invariance
+    lw = torch.stack([w for w in [out.log_weights_final]])         # [1,B,K]
+    assert float(lw.abs().max()) > 0.0, "w>1 produced all-zero FKC weights"
+
+
+def test_gate9c_cfg_beta_gt1_rejected():
+    # Annealing beta>1 combined with guidance is out of scope in v1 -> must raise.
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.5, num_particles=2, lambda_zero=0.5)
+    try:
+        _run_fkc_cfg(fkc, pf, pm, seed=1, w=2.0)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for beta>1 with guidance_scale>0")
+
+
 def test_gate7_systematic_resample_fixed_u0():
     # w = [0.7, 0.1, 0.1, 0.1], cdf = [0.7, 0.8, 0.9, 1.0], u0 = 0.1
     # positions = [0.10, 0.35, 0.60, 0.85] (all off the CDF knots) -> [0, 0, 0, 2]

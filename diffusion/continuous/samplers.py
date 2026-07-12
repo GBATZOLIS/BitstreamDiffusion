@@ -2543,10 +2543,13 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
         clean_bit_variance: float = 0.25,
         proposal: str = "em",
         churn_gamma: float = 0.0,
+        resample_entropy_frac: Optional[float] = None,
     ):
         super().__init__(model, forward_process, cfg)
         if float(beta) < 1.0:
             raise ValueError(f"beta must be >= 1, got {beta}")
+        if resample_entropy_frac is not None and not (0.0 < float(resample_entropy_frac) <= 1.0):
+            raise ValueError(f"resample_entropy_frac must be in (0,1], got {resample_entropy_frac}")
         if int(num_particles) < 1:
             raise ValueError(f"num_particles must be >= 1, got {num_particles}")
         if float(lambda_zero) < 0.0:
@@ -2575,6 +2578,13 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
         self.clean_bit_variance = float(clean_bit_variance)
         self.proposal = str(proposal)
         self.churn_gamma = float(churn_gamma)
+        # Restrict RESAMPLING to the central entropy-rate band holding this fraction
+        # of the log-sigma pdf mass (e.g. 0.8 -> [q_0.1, q_0.9]). Weights are still
+        # accumulated at EVERY step, so the tempered/geometric target is unchanged
+        # (only the estimator's resampling schedule changes); resampling outside the
+        # informative band mostly burns particle diversity on low-signal steps.
+        self.resample_entropy_frac = (None if resample_entropy_frac is None
+                                      else float(resample_entropy_frac))
         self._current_profile = None
 
     # Reuse EM's profile construction verbatim.
@@ -2583,8 +2593,15 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
     def _validate_fkc_settings(self, *, guidance_scale, posterior_temp, ati_eta):
         if self.is_cont_tokens:
             raise ValueError("FKC v1 supports binary representation only.")
-        if guidance_scale is not None and float(guidance_scale) > 0.0:
-            raise ValueError("FKC v1 does not support classifier-free guidance (guidance_scale must be 0).")
+        # guidance_scale>0 selects the CFG+FKC (Prop 3.1) two-model geometric-average
+        # target q_u^{1-w} q_c^w with w=guidance_scale. It uses guidance_scale as the
+        # geometric exponent, so it must NOT be combined with annealing beta>1 (Prop D.4).
+        w = 0.0 if guidance_scale is None else float(guidance_scale)
+        if w > 0.0 and abs(self.beta - 1.0) > 1e-8:
+            raise ValueError(
+                "CFG+FKC uses guidance_scale as the geometric-average exponent; "
+                "combining it with annealing beta>1 is unsupported in v1. Set beta=1."
+            )
         if abs(float(posterior_temp) - 1.0) > 1e-8:
             raise ValueError("FKC v1 requires posterior_temp == 1.0.")
         if ati_eta is not None and float(ati_eta) != 0.0:
@@ -2623,6 +2640,58 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             return self._denoise_binary(x_flat, sigma_scalar, d1.detach())
         # inherit
         return self._denoise_binary(x_flat, sigma_scalar, sc_flat_carry)
+
+    def _guided_posterior_and_score(
+        self, x, sigma_state, sc, sc_u, *, pf, pm, nf, cond_enabled, cfg_mode, w_cfg,
+    ):
+        """Denoise the particle batch and return the quantities the FKC step needs.
+
+        Returns (D_used, s_drift, sc_carry_c, sc_carry_u, s_weight, beta_w) where:
+          * D_used     : posterior mean used for decoding / carry-into-SC of the
+                         *primary* path (conditional D_c in CFG mode, D_geo otherwise);
+          * s_drift    : score that drives the proposal drift (d = -sigma * s_drift);
+          * sc_carry_* : base posteriors to carry as next-step SC (D_c, D_u);
+          * s_weight   : score whose free-coord L2 enters the FKC log-weight;
+          * beta_w     : coefficient in 1/2 beta_w(beta_w-1) for the weight.
+
+        Annealed (cfg_mode=False): single model. D_used=D_c, s_drift=s_weight=score,
+        beta_w=self.beta.  CFG (Prop 3.1): geometric average q_u^{1-w} q_c^w with
+        w=w_cfg. drift score = (1-w)s_u + w s_c (== standard CFG at weight w); weight
+        score = s_c - s_u; beta_w=w_cfg. D_used = D_geo = (1-w)D_u + w D_c (posterior
+        mean of the geometric target, used for decode); SC is carried per-model.
+        """
+        B, K, S = x.shape
+        sc2 = float(sigma_state) ** 2
+        Dc = self._sc_posterior(
+            x.reshape(B * K, S), sigma_state, sc.reshape(B * K, S)
+        ).reshape(B, K, S)
+        if cond_enabled:
+            _clamp_mask_(Dc, pf, pm)
+        if not cfg_mode:
+            s = (Dc - x) / sc2
+            _zero_mask_(s, pm)
+            return Dc, s, Dc, None, s, self.beta
+        # Unconditional pass: prompt region replaced by the null prefix.
+        xu = x.clone()
+        if cond_enabled:
+            _clamp_mask_(xu, nf, pm)
+        Du = self._sc_posterior(
+            xu.reshape(B * K, S), sigma_state, sc_u.reshape(B * K, S)
+        ).reshape(B, K, S)
+        if cond_enabled:
+            _clamp_mask_(Du, nf, pm)
+        s_c = (Dc - x) / sc2
+        s_u = (Du - xu) / sc2
+        _zero_mask_(s_c, pm)
+        _zero_mask_(s_u, pm)
+        s_drift = (1.0 - w_cfg) * s_u + w_cfg * s_c
+        _zero_mask_(s_drift, pm)
+        D_geo = (1.0 - w_cfg) * Du + w_cfg * Dc
+        if cond_enabled:
+            _clamp_mask_(D_geo, pf, pm)
+        s_weight = s_c - s_u
+        _zero_mask_(s_weight, pm)
+        return D_geo, s_drift, Dc, Du, s_weight, w_cfg
 
     @torch.no_grad()
     def sample_particles(
@@ -2668,22 +2737,46 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             schedule=schedule, num_steps=num_steps, entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override, sigma_max_override=sigma_max_override,
         )
+
+        # Optional resampling band: the central entropy-rate mass fraction, mapped to
+        # [sigma_lo, sigma_hi] via the saved entropy CDF. Resampling is confined here;
+        # weights still accumulate everywhere (target unchanged).
+        resample_lo, resample_hi = 0.0, float("inf")
+        if self.resample_entropy_frac is not None:
+            f = self.resample_entropy_frac
+            lo = self.sigmas.entropy_quantile((1.0 - f) / 2.0, entropy_run_dir=entropy_run_dir)
+            hi = self.sigmas.entropy_quantile((1.0 + f) / 2.0, entropy_run_dir=entropy_run_dir)
+            if lo is None or hi is None:
+                raise ValueError(
+                    "resample_entropy_frac requires the entropy CDF tables "
+                    "(entropy_cdf.pt / entropy_sigmas.pt) under entropy_run_dir."
+                )
+            resample_lo, resample_hi = float(lo), float(hi)
         # Only the EM proposal needs a lambda profile; the churn proposal owns its
         # own stochasticity via churn_gamma (and needs no entropy tables).
         self._current_profile = self._build_profile(entropy_run_dir) if self.proposal == "em" else None
         try:
             sigma0 = sigmas[0]
 
+            # CFG+FKC (Prop 3.1) is selected by guidance_scale>0: the target becomes
+            # the two-model geometric average q_u^{1-w} q_c^w with w=guidance_scale.
+            w_cfg = 0.0 if guidance_scale is None else float(guidance_scale)
+            cfg_mode = w_cfg > 0.0
+
             # Conditioning: prefix_full/mask come back [B, S]; broadcast to [B, K, S].
-            cond_enabled, prefix_full, prefix_mask, _null = _build_mask_conditioning(
+            cond_enabled, prefix_full, prefix_mask, null_prefix = _build_mask_conditioning(
                 cfg=self.cfg, B=B, S=S, device=dev,
                 conditioning_prefix_full=conditioning_prefix_full,
                 cond_prefix_mask=cond_prefix_mask,
                 conditioning_prefix=None, cond_len_bits=None,
                 is_cont_tokens=False, vocab_size=self.vocab_size,
             )
+            if cfg_mode and not cond_enabled:
+                raise ValueError("CFG+FKC (guidance_scale>0) requires a conditioning prompt.")
             pf = prefix_full.unsqueeze(1).expand(B, K, S).contiguous()
             pm = prefix_mask.unsqueeze(1).expand(B, K, S).contiguous()
+            nf = (null_prefix.unsqueeze(1).expand(B, K, S).contiguous()
+                  if (cfg_mode and null_prefix is not None) else None)
             pm_flat = pm.reshape(B * K, S)
             num_free = (~prefix_mask).sum(dim=-1).to(torch.float64).clamp_min(1.0)  # [B]
 
@@ -2703,6 +2796,11 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             sc = torch.zeros_like(x)
             if cond_enabled:
                 _clamp_mask_(sc, pf, pm)
+            # Unconditional SC particle state (CFG mode only; prompt clamped to null).
+            sc_u = None
+            if cfg_mode:
+                sc_u = torch.zeros_like(x)
+                _clamp_mask_(sc_u, nf, pm)
 
             logw = torch.zeros(B, K, dtype=torch.float64, device=dev)
             ancestors = torch.arange(K, device=dev).unsqueeze(0).expand(B, K).contiguous()
@@ -2739,26 +2837,21 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 else:
                     sigma_state = sigma_cur
 
-                x_flat = x.reshape(B * K, S)
-                sc_flat = sc.reshape(B * K, S)
-                probs_flat = self._sc_posterior(x_flat, sigma_state, sc_flat)  # D_k [N,S]
-                probs = probs_flat.reshape(B, K, S)
-                if cond_enabled:
-                    _clamp_mask_(probs, pf, pm)
-
-                score_flat = _score_from_probs(
-                    probs.reshape(B * K, S), x_flat, sigma_state, is_cont_tokens=False,
-                )                                                              # [N,S]
-                d = (-sigma_state * score_flat).reshape(B, K, S)
+                # Denoise (single model, or conditional+unconditional under CFG) and
+                # form the drift score s_drift, the decode/carry posterior D_used, and
+                # the weight score s_weight (the score DIFFERENCE s_c - s_u in CFG mode).
+                probs, s_drift, sc_carry_c, sc_carry_u, s_weight, beta_w = \
+                    self._guided_posterior_and_score(
+                        x, sigma_state, sc, sc_u, pf=pf, pm=pm, nf=nf,
+                        cond_enabled=cond_enabled, cfg_mode=cfg_mode, w_cfg=w_cfg,
+                    )
+                d = -sigma_state * s_drift
                 _zero_mask_(d, pm)
-                score = score_flat.reshape(B, K, S)
 
-                # ---- FKC log-weight increment (unscaled score, free coords) ----
-                score_free = score.clone()
-                _zero_mask_(score_free, pm)
+                # ---- FKC log-weight increment (free coords) ----
                 dsig2 = float(sigma_state) ** 2 - float(sigma_next) ** 2
-                snorm2 = score_free.to(torch.float64).square().sum(dim=-1)      # [B,K]
-                dlogw = 0.5 * beta * (beta - 1.0) * dsig2 * snorm2
+                snorm2 = s_weight.to(torch.float64).square().sum(dim=-1)        # [B,K]
+                dlogw = 0.5 * beta_w * (beta_w - 1.0) * dsig2 * snorm2
                 if not torch.isfinite(dlogw).all():
                     raise FloatingPointError(
                         f"FKC weight increment non-finite at step {i}, sigma={float(sigma_state):.4g}"
@@ -2768,7 +2861,7 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 # ---- per-step lambda (em) + resampling activity flag ----
                 delta = (sigma_state - sigma_next).clamp_min(0.0)
                 if self.proposal == "em":
-                    lam = self._current_profile.evaluate(sigma_state, state=x_flat)
+                    lam = self._current_profile.evaluate(sigma_state, state=x)
                     if self.em_step_gamma_cap is not None and float(self.lambda_zero) > 0.0:
                         lam_cap = self.em_step_gamma_cap * sigma_state / delta.clamp_min(1e-12)
                         lam = torch.minimum(lam, lam_cap)
@@ -2780,7 +2873,8 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 # ---- ESS + resampling BEFORE propagation (only where stochastic) ----
                 ess = effective_sample_size(logw)                              # [B]
                 do_group = torch.zeros(B, dtype=torch.bool, device=dev)
-                if lam_active and self.resampling_policy != "never":
+                in_band = (resample_lo <= float(sigma_cur) <= resample_hi)
+                if lam_active and in_band and self.resampling_policy != "never":
                     if self.resampling_policy == "every_step_active":
                         do_group[:] = True
                     else:  # ess
@@ -2790,10 +2884,13 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                     idx = systematic_resample_indices(logw, generator=gen)      # [B,K]
                     keep = torch.arange(K, device=dev).unsqueeze(0).expand(B, K)
                     idx = torch.where(do_group.unsqueeze(1), idx, keep)
+                    # Resample BEFORE propagation: gather the current position x, the
+                    # drift d (so the ancestor's step applies to the ancestor's x), the
+                    # per-model SC carries, and ancestry -- all with identical indices.
                     x = gather_particles(x, idx)
-                    sc = gather_particles(sc, idx)
-                    probs = gather_particles(probs, idx)
                     d = gather_particles(d, idx)
+                    sc_carry_c = gather_particles(sc_carry_c, idx)
+                    sc_carry_u = gather_particles(sc_carry_u, idx)
                     ancestors = gather_particles(ancestors, idx)
                     logw = torch.where(do_group.unsqueeze(1), torch.zeros_like(logw), logw)
 
@@ -2812,7 +2909,9 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
 
                 if cond_enabled:
                     _clamp_mask_(x, pf, pm)
-                sc = probs  # carry base posterior as next SC (inherit); resampled above
+                # Carry the base posteriors as next-step SC (inherit); gathered above.
+                sc = sc_carry_c
+                sc_u = sc_carry_u
 
                 if return_diagnostics:
                     diag.sigmas.append(float(sigma_cur))
@@ -2824,16 +2923,22 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                     if resampled_now:
                         diag.unique_ancestors.append(unique_ancestor_count(idx).detach().cpu())
 
-            # ---- pre-final-resample population (proposal coverage) ----
-            if cond_enabled:
-                _clamp_mask_(x, pf, pm)
-                _clamp_mask_(sc, pf, pm)
             sigma_final = sigmas[-1]
-            pre_probs = self._sc_posterior(
-                x.reshape(B * K, S), sigma_final, sc.reshape(B * K, S),
-            ).reshape(B, K, S)
-            if cond_enabled:
-                _clamp_mask_(pre_probs, pf, pm)
+
+            def _final_decode():
+                if cond_enabled:
+                    _clamp_mask_(x, pf, pm)
+                    _clamp_mask_(sc, pf, pm)
+                    if sc_u is not None:
+                        _clamp_mask_(sc_u, nf, pm)
+                D_used, *_rest = self._guided_posterior_and_score(
+                    x, sigma_final, sc, sc_u, pf=pf, pm=pm, nf=nf,
+                    cond_enabled=cond_enabled, cfg_mode=cfg_mode, w_cfg=w_cfg,
+                )
+                return D_used
+
+            # ---- pre-final-resample population (proposal coverage) ----
+            pre_probs = _final_decode()
             pre_bits = (pre_probs.float() >= 0.5).long()
             logw_final = logw.clone()
 
@@ -2842,17 +2947,11 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 idx = systematic_resample_indices(logw, generator=gen)
                 x = gather_particles(x, idx)
                 sc = gather_particles(sc, idx)
+                sc_u = gather_particles(sc_u, idx)
                 ancestors = gather_particles(ancestors, idx)
                 logw = torch.zeros_like(logw)
 
-            if cond_enabled:
-                _clamp_mask_(x, pf, pm)
-                _clamp_mask_(sc, pf, pm)
-            probs_final = self._sc_posterior(
-                x.reshape(B * K, S), sigma_final, sc.reshape(B * K, S),
-            ).reshape(B, K, S)
-            if cond_enabled:
-                _clamp_mask_(probs_final, pf, pm)
+            probs_final = _final_decode()
             bits = (probs_final.float() >= 0.5).long()
 
             return FKCOutput(

@@ -114,6 +114,7 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
             cfg, sampler, prefix_full=x0, prefix_mask=pm, num_steps=steps,
             schedule=args.schedule, entropy_run_dir=str(run_dir),
             sigma_min_override=args.sigma_min, seed=args.seed,
+            guidance_scale=args.guidance_scale,
         )
         S = x0.shape[1]
         gen_ids = bits_to_token_ids(out.bits.reshape(Bc * K, S), bpt).reshape(Bc, K, -1)  # [B,K,180]
@@ -203,6 +204,8 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
         "lambda_normalize": args.lambda_normalize, "resampling_policy": args.resampling_policy,
         "ess_threshold": args.ess_threshold, "sc_policy": args.sc_policy,
         "prior_mode": args.prior_mode, "final_resample": bool(args.final_resample),
+        "resample_entropy_frac": args.resample_entropy_frac,
+        "guidance_scale": args.guidance_scale,
         "ema": bool(args.ema), "sigma_data": sigma_data_used, "num_examples": n,
         "particle_mean_accuracy": part_correct / max(1, part_total),
         "pass_at_k": n_pass / max(1, n),
@@ -223,6 +226,10 @@ def _run_fkc_sudoku(cfg, sampler, ds, n, bpt, args, run_dir, out_dir, sigma_data
                 else f"churn_g{args.churn_gamma:g}")
     tag = (f"{cfg.data.difficulty}_fkc_{prop_tag}_beta{args.beta:g}_K{K}_s{steps}"
            f"_{args.resampling_policy}_sc{args.sc_policy}_ess{args.ess_threshold:g}_ema{int(bool(args.ema))}")
+    if args.guidance_scale > 0.0:
+        tag += f"_cfgw{args.guidance_scale:g}"
+    if args.resample_entropy_frac is not None:
+        tag += f"_rband{args.resample_entropy_frac:g}"
     out_path = out_dir / f"sudoku_results_{tag}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print("\n=== SUDOKU FKC RESULT ===")
@@ -306,6 +313,11 @@ def main():
     ap.add_argument("--churn_gamma", type=float, default=0.0,
                     help="FKC edm_churn proposal: per-step churn gamma (capped at sqrt(2)-1). "
                          "Provides the stochasticity that lets duplicated ancestors branch.")
+    ap.add_argument("--resample_entropy_frac", type=float, default=None,
+                    help="Confine RESAMPLING to the central entropy-rate band holding this "
+                         "fraction of the log-sigma pdf mass (e.g. 0.8 => [q0.1, q0.9]). Weights "
+                         "still accumulate everywhere (target unchanged); avoids burning particle "
+                         "diversity on low-signal steps outside the informative band.")
     ap.add_argument("--out_dir", default=None)
     ap.add_argument("--allow_cpu", action="store_true",
                     help="Permit running on CPU. By default the eval ASSERTS CUDA is available, "
@@ -346,7 +358,8 @@ def main():
         fkc_ess_threshold_fraction=args.ess_threshold,
         fkc_final_resample=bool(args.final_resample),
         fkc_sc_policy=args.sc_policy, fkc_prior_mode=args.prior_mode,
-        fkc_proposal=args.proposal, fkc_churn_gamma=args.churn_gamma)
+        fkc_proposal=args.proposal, fkc_churn_gamma=args.churn_gamma,
+        fkc_resample_entropy_frac=args.resample_entropy_frac)
     schedule = args.schedule
     configure_stochastic(cfg, mode=args.sampler, gamma=args.gamma, num_steps=steps)
 

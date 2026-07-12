@@ -43,7 +43,12 @@ class TinyBinaryDenoiser(nn.Module):
         # Pull x toward a fixed per-bit target, damped at high sigma; deterministic.
         drive = (target - (x_t - 0.5)) / (1.0 + s)
         sc = 0.0 if x0_hat is None else (x0_hat - 0.5) * 0.1
-        return (drive + self.b.unsqueeze(0) + sc) * self.gain
+        # Global coupling: each position's logit depends on the row mean (a crude
+        # stand-in for attention), so clamping the prompt to different values (the
+        # conditional vs the CFG null prefix) changes the FREE-coord predictions.
+        # Without this the per-position stand-in makes q_c == q_u on free coords.
+        gmean = (x_t.to(target.dtype).mean(dim=-1, keepdim=True) - 0.5)
+        return (drive + self.b.unsqueeze(0) + sc + 0.5 * gmean) * self.gain
 
 
 def make_cpu_cfg(*, self_condition: bool = True, num_steps: int = 12):
