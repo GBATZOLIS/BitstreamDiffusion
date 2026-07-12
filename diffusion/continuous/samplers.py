@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -2484,6 +2485,35 @@ class PredictorCorrectorSampler(DDIMSampler):
             self._current_profile = None
 
 
+_CHURN_FKC_INEXACT_WARNED = False
+
+
+def _warn_churn_fkc_inexact():
+    """Warn once that edm_churn + (beta>1 or CFG w>1) is only leading-order FKC.
+
+    EDM churn does not commute with tempering and the per-step gamma is a fixed
+    constant (not S_churn/N), so this proposal does not refine to the tempered
+    reverse SDE as NFE grows. Use proposal='em' for a target-accurate FKC sampler
+    of p^beta, or run an NFE / gamma_i=S_churn/N refinement study before drawing
+    conclusions about the tempered distribution.
+    """
+    global _CHURN_FKC_INEXACT_WARNED
+    if _CHURN_FKC_INEXACT_WARNED:
+        return
+    _CHURN_FKC_INEXACT_WARNED = True
+    warnings.warn(
+        "FKC proposal='edm_churn' with beta>1 (or CFG guidance_scale>1) is only a "
+        "leading-order approximation of the tempered target p^beta: EDM churn does "
+        "not commute with tempering (p_sigma^beta * N != p_sigma_hat^beta) and the "
+        "per-step gamma is a fixed constant, not S_churn/N, so it does not refine to "
+        "the reverse SDE as NFE grows. Use proposal='em' for target-accurate FKC, or "
+        "validate with an NFE / gamma_i=S_churn/N refinement study before concluding "
+        "anything about p^beta.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
     """Feynman-Kac corrector sampler for the tempered target pi_beta ~ p_theta^beta.
 
@@ -2763,6 +2793,13 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
             w_cfg = 0.0 if guidance_scale is None else float(guidance_scale)
             cfg_mode = w_cfg > 0.0
 
+            # edm_churn is only leading-order-correct for a tempered target; warn once
+            # when the corrector is actually active (beta>1 or CFG w>1).
+            if self.proposal == "edm_churn" and (
+                self.beta > 1.0 + 1e-8 or w_cfg > 1.0 + 1e-8
+            ):
+                _warn_churn_fkc_inexact()
+
             # Conditioning: prefix_full/mask come back [B, S]; broadcast to [B, K, S].
             cond_enabled, prefix_full, prefix_mask, null_prefix = _build_mask_conditioning(
                 cfg=self.cfg, B=B, S=S, device=dev,
@@ -2822,10 +2859,16 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 #             drift (explicit reverse-SDE Euler-Maruyama step).
                 # edm_churn : churn up to sigma_hat = sigma_cur*(1+gamma) BEFORE the
                 #             denoiser (EDM Alg.2), then a beta-scaled PF-ODE step down.
-                #             The FKC weight/tempering is identical; this is the
-                #             APPROXIMATE (asymptotically-exact) churn analogue of the
-                #             reverse-SDE proposal, empirically far more stable at low
-                #             NFE on these checkpoints.
+                #             This is the APPROXIMATE churn analogue of the reverse-SDE
+                #             proposal, empirically more stable at low NFE. It is exact
+                #             only in the small-step limit AND only at beta==1: for
+                #             beta>1, tempering does not commute with the Gaussian churn
+                #             kernel (p_sigma^beta * N != p_sigma_hat^beta), and the
+                #             per-step gamma here is a fixed constant (not S_churn/N), so
+                #             it does not refine to the reverse SDE as NFE grows. The FKC
+                #             weight is therefore taken over the consecutive-target
+                #             interval sigma_cur -> sigma_next (below), which is exact for
+                #             'em' and leading-order for edm_churn (see _warn_churn_fkc_inexact).
                 if self.proposal == "edm_churn" and self.churn_gamma > 0.0:
                     gamma = min(self.churn_gamma, math.sqrt(2.0) - 1.0)
                     sigma_state = sigma_cur * (1.0 + gamma)
@@ -2849,7 +2892,19 @@ class FeynmanKacEulerMaruyamaSampler(DDIMSampler):
                 _zero_mask_(d, pm)
 
                 # ---- FKC log-weight increment (free coords) ----
-                dsig2 = float(sigma_state) ** 2 - float(sigma_next) ** 2
+                # The FKC potential is integrated over the interval between CONSECUTIVE
+                # tempered targets (sigma_cur -> sigma_next) -- a property of the target
+                # sequence alone. For edm_churn the up-churn to sigma_state=sigma_hat is
+                # an internal proposal detail and must NOT enter the target-ratio weight:
+                # using sigma_hat here double-counts the excursion sigma_hat^2 - sigma_cur^2
+                # = [(1+gamma)^2 - 1] sigma_cur^2 (~0.96 sigma_cur^2 at gamma=0.4, which on
+                # a log-spaced schedule dwarfs the genuine sigma_cur^2 - sigma_next^2 term
+                # and blows up the weight variance). For the 'em' proposal sigma_state ==
+                # sigma_cur, so this is bit-identical there. (The score in snorm2 is still
+                # evaluated at sigma_hat -- an O(gamma) approximation of the score at
+                # sigma_cur; correcting it would need a second denoiser call. See the
+                # edm_churn proposal note above: this path is leading-order for beta>1.)
+                dsig2 = float(sigma_cur) ** 2 - float(sigma_next) ** 2
                 snorm2 = s_weight.to(torch.float64).square().sum(dim=-1)        # [B,K]
                 dlogw = 0.5 * beta_w * (beta_w - 1.0) * dsig2 * snorm2
                 if not torch.isfinite(dlogw).all():

@@ -4,6 +4,8 @@ These MUST pass before any Sudoku/GSM8K FKC sweep (they guard the tempering
 math and the particle bookkeeping):
 
   Gate 1  beta=1, K=1 is bit-identical to EulerMaruyamaSampler (lambda0=0 and >0)
+  Gate 1c beta>1 edm_churn: FKC weight uses the sigma_cur->sigma_next interval
+          (consecutive targets), NOT the churned sigma_hat  [regression]
   Gate 2  beta=1: every weight increment is 0, ESS==K, no in-loop resampling
   Gate 3  beta>1, K=1: weights/resampling cannot change the trajectory (control)
   Gate 4  prompt invariance: clamped coords never move; drift/noise zero there
@@ -133,6 +135,74 @@ def test_gate1b_churn_proposal_bit_identical_to_ddim_churn():
     assert torch.equal(x_d, out.x.squeeze(1)), \
         f"churn x max|diff|={float((x_d-out.x.squeeze(1)).abs().max()):.3e}"
     assert torch.equal(bits_d, out.bits.squeeze(1))
+
+
+def test_gate1c_churn_fkc_weight_uses_consecutive_target_interval():
+    # REGRESSION for the load-bearing FKC bug. For proposal='edm_churn' at beta>1 the
+    # FKC log-weight increment must be integrated over the CONSECUTIVE-TARGET interval
+    # sigma_cur^2 - sigma_next^2, NOT the churned-up sigma_hat^2 - sigma_next^2. Using
+    # sigma_hat double-counts the up-churn excursion [(1+gamma)^2-1] sigma_cur^2 (~0.96
+    # sigma_cur^2 at gamma=0.4) and is what collapsed ESS. Unlike Gate 8 (a hand loop),
+    # this drives the REAL sample_particles edm_churn path: we spy on s_weight at every
+    # step and check log_weights_final matches the sigma_cur formula to fp precision --
+    # and differs materially from the sigma_hat formula. Fails on the pre-fix code.
+    beta, gamma, K = 1.5, 0.4, 3
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = FeynmanKacEulerMaruyamaSampler(
+        model, ContinuousForwardProcess(cfg), cfg,
+        beta=beta, num_particles=K, proposal="edm_churn", churn_gamma=gamma,
+        resampling_policy="never", final_resample=False,   # keep logw un-reset
+    )
+
+    # Spy on every denoiser call: capture (sigma_state, s_weight). The in-loop calls use
+    # the churned sigma_hat; the trailing final-decode calls use the un-churned final
+    # sigma. diagnostics.sigmas has exactly one float(sigma_cur) per real step, so it
+    # gives us both the step count N and the exact sigma_cur grid (no un-churn needed).
+    captured = []
+    orig = fkc._guided_posterior_and_score
+
+    def _spy(x, sigma_state, sc, sc_u, **kw):
+        out = orig(x, sigma_state, sc, sc_u, **kw)      # (..., s_weight, beta_w)
+        captured.append((float(sigma_state), out[4].detach().clone()))
+        return out
+
+    fkc._guided_posterior_and_score = _spy
+
+    torch.manual_seed(123)
+    out = fkc.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=123, progress=False,
+    )
+    logw = out.log_weights_final                        # [B, K], accumulated, never reset
+
+    g_eff = min(gamma, math.sqrt(2.0) - 1.0)
+    sig_cur = [float(s) for s in out.diagnostics.sigmas]   # exact sigma_cur per step
+    N = len(sig_cur)
+    sigma_final = captured[N][0]                         # first final-decode call, un-churned
+    sig_next = sig_cur[1:] + [sigma_final]
+    sig_hat = [c * (1.0 + g_eff) for c in sig_cur]       # what the buggy code used
+    s_weights = [w for _, w in captured[:N]]
+
+    def _accumulate(intervals):
+        acc = torch.zeros_like(logw)
+        for dsig2, s in zip(intervals, s_weights):
+            snorm2 = s.to(torch.float64).square().sum(dim=-1)      # [B, K]
+            acc = acc + 0.5 * beta * (beta - 1.0) * dsig2 * snorm2
+        return acc
+
+    want_cur = _accumulate([c * c - n * n for c, n in zip(sig_cur, sig_next)])
+    want_hat = _accumulate([h * h - n * n for h, n in zip(sig_hat, sig_next)])
+
+    assert torch.allclose(logw, want_cur, atol=1e-6, rtol=1e-6), (
+        "edm_churn FKC weight must use the sigma_cur->sigma_next interval; "
+        f"max|logw - want_cur|={float((logw - want_cur).abs().max()):.3e}"
+    )
+    # Guard that the test actually discriminates: the buggy sigma_hat interval is far off.
+    denom = want_cur.abs().max().clamp_min(1e-12)
+    rel = float((want_hat - want_cur).abs().max() / denom)
+    assert rel > 0.5, f"non-discriminating: sigma_hat vs sigma_cur differ by only {rel:.2%}"
 
 
 def test_gate2_beta_one_weights_are_noop():
