@@ -504,6 +504,72 @@ def test_gate10_cfg_gaussian_lambda_sigma():
     _check_gate10("sigma")
 
 
+# ------------------------------- Gate 11 ----------------------------------
+# CODE-PATH validation of CFG-FKC: Gate 10 checks the weight MATH; Gate 11 drives
+# the REAL sample_particles CFG path (annealing beta=1, guidance w>1, em proposal
+# so sigma_state == sigma_cur) and confirms the sampler wires the right quantities
+# into the shared weight kernel:
+#   (1) s_weight IS the score difference s_c - s_u  (independently == (Dc-Du)/sigma^2
+#       in the free/non-prompt region, from the two posteriors the method returns),
+#   (2) beta_w == w (the guidance weight, NOT the annealing beta=1),
+#   (3) log_weights_final == 1/2 * w(w-1) * sum (sigma_cur^2 - sigma_next^2) * ||s_weight||^2.
+
+def test_gate11_cfg_sampler_wires_score_diff_and_betaw():
+    w, K = 2.0, 3
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = _fkc(cfg, model, beta=1.0, num_particles=K, lambda_zero=0.5)  # em proposal
+
+    captured = []
+    orig = fkc._guided_posterior_and_score
+
+    def _spy(x, sigma_state, sc, sc_u, **kw):
+        out = orig(x, sigma_state, sc, sc_u, **kw)   # (D_geo, s_drift, Dc, Du, s_weight, beta_w)
+        Dc, Du, s_weight, beta_w = out[2], out[3], out[4], float(out[5])
+        sc2 = float(sigma_state) ** 2
+        pmb = kw["pm"].bool()
+        free = (~(pmb if pmb.dim() == x.dim() else pmb.unsqueeze(1)))  # [B,1,S] broadcast over K
+        s_diff = (Dc - Du) / sc2                                      # == s_c - s_u in free coords
+        # atol/rtol absorb the float-cancellation gap between the code's
+        # (Dc-x)/s^2 - (Du-x)/s^2 and this recomputed (Dc-Du)/s^2 (~2e-6 at low
+        # sigma); a WRONG s_weight (e.g. s_c, or the negated diff) would be off
+        # by O(0.1-1), so this still discriminates strongly.
+        diff_ok = torch.allclose((s_weight * free), (s_diff * free), atol=1e-4, rtol=1e-2)
+        captured.append((float(sigma_state), s_weight.detach().clone(), beta_w, bool(diff_ok)))
+        return out
+
+    fkc._guided_posterior_and_score = _spy
+    torch.manual_seed(7)
+    out = fkc.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=7, guidance_scale=w, progress=False,
+    )
+    logw = out.log_weights_final
+
+    sig_cur = [float(s) for s in out.diagnostics.sigmas]
+    N = len(sig_cur)
+    sigma_final = captured[N][0]
+    sig_next = sig_cur[1:] + [sigma_final]
+    steps = captured[:N]
+
+    # (1) s_weight is the score DIFFERENCE (Dc-Du)/sigma^2 at every in-loop step
+    assert all(ok for _, _, _, ok in steps), "s_weight is not s_c - s_u in the free region"
+    # em proposal => the spied sigma_state is exactly sigma_cur
+    assert all(abs(s0 - c) < 1e-9 for (s0, _, _, _), c in zip(steps, sig_cur))
+    # (2) the weight coefficient is the GUIDANCE weight w, not the annealing beta (=1)
+    assert all(abs(b - w) < 1e-9 for _, _, b, _ in steps), "beta_w != guidance weight w"
+
+    # (3) accumulated log-weights match the CFG formula with the sampler's own s_weight
+    acc = torch.zeros_like(logw)
+    for (c, n, (_, s, _, _)) in zip(sig_cur, sig_next, steps):
+        snorm2 = s.to(torch.float64).square().sum(dim=-1)
+        acc = acc + 0.5 * w * (w - 1.0) * (c * c - n * n) * snorm2
+    assert torch.allclose(logw, acc, atol=1e-6, rtol=1e-6), \
+        f"sampler CFG weight != formula; max|logw-acc|={float((logw - acc).abs().max()):.3e}"
+    assert float(logw.abs().max()) > 0.0, "w>1 produced all-zero CFG weights"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
