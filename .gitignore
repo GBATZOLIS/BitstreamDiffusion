@@ -77,3 +77,6 @@ datasets/sudoku/
 datasets/tinygsm/
 datasets/tinygsm_smoke/
 logs/tasks/
+
+# CFG-FKC 2D/1D demo generated figures + artifact (regenerable via scripts/fkc_cfg_2d_demo.py)
+scripts/_fkc_cfg_2d_out/
