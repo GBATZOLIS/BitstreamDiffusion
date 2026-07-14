@@ -421,6 +421,89 @@ def test_gate8_gaussian_lambda_sigma():
     _check_gate8("sigma")
 
 
+# ------------------------------- Gate 10 ----------------------------------
+# Analytic 1-D Gaussian CFG-FKC (Prop 3.1), the two-model analogue of Gate 8.
+# It validates the three CFG-specific pieces Gate 8 does NOT cover: the guided
+# DRIFT s_u + w(s_c - s_u), the score-DIFFERENCE weight ||s_c - s_u||^2, and the
+# beta_w = w mapping.
+#
+# Unconditional q_u = N(0, v_u + sigma^2), conditional q_c = N(0, v_c + sigma^2),
+#   s_u = -x/(v_u+sigma^2),  s_c = -x/(v_c+sigma^2).
+# Geometric average q_u^{1-w} q_c^{w} is Gaussian with
+#   1/Var* = (1-w)/(v_u+sigma^2) + w/(v_c+sigma^2).
+# Proposal (codebase convention, annealing beta=1 for pure CFG; h=s_next-s_cur):
+#   s_geo = (1-w) s_u + w s_c = s_u + w (s_c - s_u);  d = -sigma * s_geo
+#   x     <- x + h*(1+lam)*d + sqrt(2*lam*sigma*Delta)*z
+#   dlogw += 0.5*w*(w-1)*(sigma_cur^2 - sigma_next^2)*||s_c - s_u||^2
+# The FK weight is lambda-independent, so the weighted terminal variance must hit
+# Var*(sigma_min) for every lambda -- the theorem under test. A weight using
+# ||s_c||^2 or ||s_u||^2 (instead of the difference), or the wrong coefficient,
+# misses the target; lambda-independence would also break.
+
+def _analytic_cfg_weighted_var(w, lam_mode, *, v_u=1.0, v_c=0.4, K=16384, N=200, seed=0):
+    torch.manual_seed(seed)
+    gen = torch.Generator().manual_seed(seed + 1)
+    sig_max, sig_min = 3.0, 0.5
+    i = torch.linspace(0, 1, N + 1, dtype=torch.float64)
+    sigmas = sig_max + i * (sig_min - sig_max)
+
+    def target_var(sig2):
+        inv = (1.0 - w) / (v_u + sig2) + w / (v_c + sig2)
+        return 1.0 / inv
+
+    def lam_of(sig):
+        if lam_mode == "zero":
+            return 0.0
+        if lam_mode == "one":
+            return 1.0
+        if lam_mode == "inv_w":
+            return 1.0 / w
+        return float(0.5 + 0.6 * math.exp(-((math.log(float(sig))) ** 2) / 2.0))
+
+    # Prior = geometric-average high-sigma marginal.
+    x = torch.randn(1, K, dtype=torch.float64) * math.sqrt(target_var(sig_max ** 2))
+    logw = torch.zeros(1, K, dtype=torch.float64)
+    for k in range(N):
+        sc, sn = sigmas[k], sigmas[k + 1]
+        s_u = -x / (v_u + sc ** 2)
+        s_c = -x / (v_c + sc ** 2)
+        s_geo = (1.0 - w) * s_u + w * s_c        # guided drift score = s_u + w(s_c - s_u)
+        s_wt = s_c - s_u                          # weight uses the score DIFFERENCE
+        logw = logw + 0.5 * w * (w - 1.0) * (sc ** 2 - sn ** 2) * (s_wt ** 2)
+        lam = lam_of(sc)
+        h = sn - sc
+        d = -sc * s_geo
+        x = x + h * (1.0 + lam) * d               # annealing beta = 1 for pure CFG
+        if lam > 0.0:
+            delta = (sc - sn).clamp_min(0.0)
+            z = torch.randn(1, K, dtype=torch.float64, generator=gen)
+            x = x + (2.0 * lam * sc * delta).clamp_min(0.0).sqrt() * z
+    return _weighted_var(x, logw), target_var(float(sigmas[-1]) ** 2)
+
+
+def _check_gate10(lam_mode):
+    w = 1.5
+    got, want = _analytic_cfg_weighted_var(w, lam_mode)
+    rel = abs(got - want) / want
+    assert rel < 0.12, f"lam={lam_mode}: weighted Var={got:.4f} want {want:.4f} (rel {rel:.2%})"
+
+
+def test_gate10_cfg_gaussian_lambda_zero():
+    _check_gate10("zero")
+
+
+def test_gate10_cfg_gaussian_lambda_one():
+    _check_gate10("one")
+
+
+def test_gate10_cfg_gaussian_lambda_inv_w():
+    _check_gate10("inv_w")
+
+
+def test_gate10_cfg_gaussian_lambda_sigma():
+    _check_gate10("sigma")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
