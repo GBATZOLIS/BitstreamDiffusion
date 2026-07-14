@@ -570,6 +570,76 @@ def test_gate11_cfg_sampler_wires_score_diff_and_betaw():
     assert float(logw.abs().max()) > 0.0, "w>1 produced all-zero CFG weights"
 
 
+# ------------------------------- Gate 12 ----------------------------------
+# CFG analogue of Gate 1c: the load-bearing interval fix must ALSO hold for the
+# CFG-FKC edm_churn path (annealing beta=1, guidance w>1). Drives the real
+# sample_particles CFG+churn path, spies on s_weight (evaluated at sigma_hat --
+# the documented O(gamma) score-location approximation) and beta_w, and asserts
+# log_weights_final uses the CONSECUTIVE-TARGET interval sigma_cur^2 - sigma_next^2
+# (NOT the churned sigma_hat interval), with beta_w == w and s_weight == s_c - s_u.
+
+def test_gate12_cfg_churn_weight_uses_consecutive_target_interval():
+    w, gamma, K = 2.0, 0.4, 3
+    cfg = make_cpu_cfg(num_steps=STEPS)
+    model = TinyBinaryDenoiser(S, seed=3)
+    pf, pm = make_conditioning(B, S, NP, seed=5)
+    fkc = FeynmanKacEulerMaruyamaSampler(
+        model, ContinuousForwardProcess(cfg), cfg,
+        beta=1.0, num_particles=K, proposal="edm_churn", churn_gamma=gamma,
+        resampling_policy="never", final_resample=False,   # keep logw un-reset
+    )
+
+    captured = []
+    orig = fkc._guided_posterior_and_score
+
+    def _spy(x, sigma_state, sc, sc_u, **kw):
+        out = orig(x, sigma_state, sc, sc_u, **kw)
+        Dc, Du, s_weight, beta_w = out[2], out[3], out[4], float(out[5])
+        sc2 = float(sigma_state) ** 2                       # sigma_hat^2 under churn
+        pmb = kw["pm"].bool()
+        free = ~(pmb if pmb.dim() == x.dim() else pmb.unsqueeze(1))
+        diff_ok = torch.allclose((s_weight * free), (((Dc - Du) / sc2) * free), atol=1e-4, rtol=1e-2)
+        captured.append((float(sigma_state), s_weight.detach().clone(), beta_w, bool(diff_ok)))
+        return out
+
+    fkc._guided_posterior_and_score = _spy
+    torch.manual_seed(123)
+    out = fkc.sample_particles(
+        num_prompts=B, seq_len=S, conditioning_prefix_full=pf, cond_prefix_mask=pm,
+        num_steps=STEPS, schedule="karras", seed=123, guidance_scale=w, progress=False,
+    )
+    logw = out.log_weights_final
+
+    g_eff = min(gamma, math.sqrt(2.0) - 1.0)
+    sig_cur = [float(s) for s in out.diagnostics.sigmas]
+    N = len(sig_cur)
+    sigma_final = captured[N][0]                            # first final-decode call, un-churned
+    sig_next = sig_cur[1:] + [sigma_final]
+    sig_hat = [c * (1.0 + g_eff) for c in sig_cur]          # what the buggy interval would use
+    steps = captured[:N]
+    s_weights = [s for _, s, _, _ in steps]
+
+    assert all(ok for _, _, _, ok in steps), "s_weight is not s_c - s_u (free) under churn"
+    assert all(abs(b - w) < 1e-9 for _, _, b, _ in steps), "beta_w != guidance weight w"
+
+    def _accumulate(intervals):
+        acc = torch.zeros_like(logw)
+        for dsig2, s in zip(intervals, s_weights):
+            snorm2 = s.to(torch.float64).square().sum(dim=-1)
+            acc = acc + 0.5 * w * (w - 1.0) * dsig2 * snorm2
+        return acc
+
+    want_cur = _accumulate([c * c - n * n for c, n in zip(sig_cur, sig_next)])
+    want_hat = _accumulate([h * h - n * n for h, n in zip(sig_hat, sig_next)])
+    assert torch.allclose(logw, want_cur, atol=1e-6, rtol=1e-6), (
+        "CFG+churn FKC weight must use the sigma_cur->sigma_next interval; "
+        f"max|logw - want_cur|={float((logw - want_cur).abs().max()):.3e}"
+    )
+    denom = want_cur.abs().max().clamp_min(1e-12)
+    rel = float((want_hat - want_cur).abs().max() / denom)
+    assert rel > 0.5, f"non-discriminating: sigma_hat vs sigma_cur differ by only {rel:.2%}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
