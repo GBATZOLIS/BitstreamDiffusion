@@ -1,0 +1,58 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage{booktabs,array,amsmath,xcolor,enumitem}
+\usepackage[T1]{fontenc}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\parindent}{0pt}\setlength{\parskip}{3pt}
+\usepackage{titlesec}
+\titlespacing{\section}{0pt}{4pt}{2pt}
+\titleformat{\section}{\normalfont\large\bfseries}{}{0pt}{}
+\pagestyle{empty}
+\newcommand{\hl}[1]{\textcolor{blue!60!black}{\textbf{#1}}}
+\begin{document}
+
+\begin{center}
+{\Large\bfseries Temperature scaling \& Feynman--Kac correctors on CoBit (hard Sudoku)}\\[2pt]
+{\small One-page summary $\bullet$ branch \texttt{tasks/fkc-temperature} $\bullet$ raw (non-EMA) weights, $K{=}16$, 180 steps, hard difficulty}
+\end{center}
+\vspace{-4pt}
+
+\section*{Setup}
+CoBit = continuous VE diffusion over analog bits; denoiser posterior $D_\theta$, score $s_\theta=(D_\theta-x)/\sigma^2$; prompt clamped. Goal: principled low-temperature / annealed / guided sampling. We implemented \hl{A1} (local score-level temperature $\kappa(\sigma)=\tfrac{v+\sigma^2}{\tau v+\sigma^2}$, $v{=}0.25$), a \hl{Feynman--Kac Euler--Maruyama SMC sampler} (annealed $p_c^\beta$ and CFG/Prop-3.1 geometric average $q_u^{1-w}q_c^w$; \texttt{em} and \texttt{edm\_churn} proposals; weight $\tfrac12\beta(\beta{-}1)\Delta\sigma^2\lVert s\rVert^2_{\text{free}}$), and an \hl{entropy-band} resampling option. 16 correctness gates pass (incl.\ analytic 1-D Gaussian $\mathrm{Var}\!\to\!(v+\sigma^2)/\beta$).
+
+\section*{Headline results}
+\begin{center}\small
+\begin{tabular}{@{}l r r r l@{}}
+\toprule
+config (hard, $K{=}16$) & maj@16 & pass@16 & distinct/16 & note\\
+\midrule
+$\beta{=}1$ voting (no reweighting) & \hl{90.8\%} & 93.6\% & 5.45 & reference \\
+$\beta{=}1.02$, \textbf{resampling OFF} & \hl{90.6\%} & 93.4\% & 5.44 & \textbf{ties} voting; diversity kept \\
+$\beta{=}1.02$, resample (ESS$<$K/2) & 84.8\% & 87.5\% & 4.07 & resampling erodes diversity \\
+$\beta{=}1.05$, resample & 71.5\% & 72.3\% & 2.70 & collapse ($\to$2 samples) \\
+CFG-FKC $w{=}1.5$, resample & $\sim$64\% & $\sim$64\% & $\sim$2 & pass$=$maj (full collapse) \\
+A1 $\tau$: $1.0\!\to\!0.3$ (deterministic) & \multicolumn{3}{l}{exact $41.2\!\to\!43.4\%$, valid $43.4\!\to\!47.4\%$} & monotone, no collapse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Main conclusions}
+\begin{enumerate}[label=\arabic*.]
+\item \hl{The culprit is resampling, not tempering.} Genealogical resampling collapses the 16-particle cloud from $\sim$5.4 to $\sim$2 distinct solutions, destroying the coverage that makes voting work. Particle \emph{mean} accuracy stays $\sim$67\% throughout --- particles don't get worse, they get \emph{correlated}.
+\item \hl{Tempered-drift + voting (resampling off) ties $\beta{=}1$ voting} (90.6 vs 90.8, within $n{=}512$ noise), with diversity preserved. So mild tempering neither clearly helps nor hurts; the FK \emph{correction} (resample-toward-the-weight) is the part that hurts.
+\item \hl{The FKC path weight is not a correctness signal.} On the resampling-off run (full, unreset cumulative potential): highest-weight particle $63.9\%$ $<$ mean $66.9\%$; weight-weighted vote $88.5\%$ $<$ plain vote $90.6\%$. Using the weight to select/vote \emph{hurts}.
+\item \hl{Coverage is diversity-bound.} Even $\beta{=}1$ yields only 5.45 distinct of 16 (limited stochastic diversity), so raw $K$ has diminishing returns ($K{=}32$ barely beat $K{=}16$).
+\item \hl{A1 is the one lever that helps} --- small, monotone, collapse-free --- because it is a gentle deterministic score-sharpening with no importance weights to degenerate.
+\end{enumerate}
+
+\section*{What we do \emph{not} claim (post-review)}
+Not established: that model confidence is unrelated to correctness (the voting gain suggests the opposite); nor that correctly-implemented FKC fails on CoBit. Untested links: \texttt{edm\_churn} weight at $\beta{>}1$ / finite $N{=}180$ (asymptotic only); carry self-conditioning vs the Markov-score assumption; mode-reweighting (gate tested variance only). CFG results confounded by a weak 20k-step, dropout-trained checkpoint.
+
+\section*{Recommended next steps}
+(i) \hl{Verify@K} using the Sudoku rule-checker (a label-free, near-exact correctness oracle) $\Rightarrow$ realizes pass@K $\approx$ \hl{94\%} for free (Track C, Phase 0).
+(ii) \hl{Reward-guided SMC} (SVDD): replace the likelihood weight with the constraint-satisfaction reward --- steer trajectories toward \emph{correct} modes, not confident ones.
+(iii) Decisive FKC audits: \texttt{never}-resample $\beta$-sweep (does any $\beta$ beat voting?); toy-mixture mode-reweighting \& $N$-convergence; self-conditioning ablation.
+
+\vspace{2pt}\hrule\vspace{2pt}
+{\footnotesize Full detail: \texttt{docs/fkc\_temperature\_report.md} (methods, math, all tables, threats to validity, reproduction). Commits \texttt{ead8f4b}$\to$\texttt{aa87579}.}
+\end{document}

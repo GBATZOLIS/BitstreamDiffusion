@@ -1,0 +1,57 @@
+[sigma_data] sampling with sigma_data=0.4624  (source: trained value from sigma_data.json (0.4624))
+/home/gb511/BitstreamDiffusion/evaluation/tasks/_task_common.py:104: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(ckpt_path, map_location="cpu")
+/home/gb511/BitstreamDiffusion/data/sudoku.py:99: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(cache)
+✅ Instantiating SequenceVDTContinuousModel for framework: 'continuous_score'
+[task_eval] sampler = FeynmanKacEulerMaruyamaSampler
+[sudoku-fkc] 100/1000  pass@16=80 (80.0%)  maj@16=78 (78.0%)  min_ess=1.02
+[sudoku-fkc] 200/1000  pass@16=154 (77.0%)  maj@16=152 (76.0%)  min_ess=1.02
+[sudoku-fkc] 300/1000  pass@16=232 (77.3%)  maj@16=230 (76.7%)  min_ess=1.00
+[sudoku-fkc] 400/1000  pass@16=307 (76.8%)  maj@16=304 (76.0%)  min_ess=1.00
+[sudoku-fkc] 500/1000  pass@16=380 (76.0%)  maj@16=375 (75.0%)  min_ess=1.00
+[sudoku-fkc] 600/1000  pass@16=452 (75.3%)  maj@16=446 (74.3%)  min_ess=1.00
+[sudoku-fkc] 700/1000  pass@16=529 (75.6%)  maj@16=523 (74.7%)  min_ess=1.00
+[sudoku-fkc] 800/1000  pass@16=590 (73.8%)  maj@16=582 (72.8%)  min_ess=1.00
+[sudoku-fkc] 900/1000  pass@16=659 (73.2%)  maj@16=651 (72.3%)  min_ess=1.00
+[sudoku-fkc] 1000/1000  pass@16=734 (73.4%)  maj@16=726 (72.6%)  min_ess=1.00
+
+=== SUDOKU FKC RESULT ===
+{
+  "task": "sudoku",
+  "difficulty": "hard",
+  "checkpoint": "runs/tasks/sudoku/hard/cobit_raw_binary_bits/checkpoints/step=000020000.pt",
+  "sampler_kind": "fkc_em",
+  "beta": 1.05,
+  "num_particles": 16,
+  "steps": 180,
+  "proposal": "edm_churn",
+  "churn_gamma": 0.4,
+  "lambda_zero": 0.0,
+  "lambda_profile": "entropy_rate",
+  "lambda_normalize": "as_saved",
+  "resampling_policy": "ess",
+  "ess_threshold": 0.5,
+  "sc_policy": "inherit",
+  "prior_mode": "sampler_gaussian",
+  "final_resample": true,
+  "resample_entropy_frac": 0.8,
+  "guidance_scale": 0.0,
+  "ema": false,
+  "sigma_data": 0.4624,
+  "num_examples": 1000,
+  "particle_mean_accuracy": 0.6703125,
+  "pass_at_k": 0.734,
+  "maj_at_k": 0.726,
+  "top_weight_accuracy": 0.671,
+  "bottom_weight_accuracy": 0.666,
+  "weighted_vote_accuracy": 0.756,
+  "mean_weight_of_correct": 0.06289874753378778,
+  "mean_weight_of_incorrect": 0.06170310275481428,
+  "valid_sudoku_rate": 0.7130625,
+  "mean_distinct_solutions": 2.087,
+  "min_ess": 1.0015532948773573,
+  "total_resample_events": 1430,
+  "mean_final_unique_ancestors": 14.558
+}
+saved -> /home/gb511/BitstreamDiffusion/runs/tasks/sudoku/hard/cobit_raw_binary_bits/sudoku_eval/sudoku_results_hard_fkc_churn_g0.4_beta1.05_K16_s180_ess_scinherit_ess0.5_ema0_rband0.8.json

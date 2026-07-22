@@ -1,0 +1,113 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[T1]{fontenc}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\definecolor{cobit}{RGB}{0,90,170}
+\pagestyle{empty}
+
+\newcommand{\best}[1]{\textbf{\color{cobit}#1}}
+
+\begin{document}
+
+{\Large\bfseries CoBit on Sudoku: bitstream diffusion vs.\ S-FLM baselines}\\[2pt]
+{\small Continuous bitstream diffusion (CoBit) evaluated under the S-FLM verifiable-task protocol. \hfill 17 June 2026}
+
+\vspace{-2pt}
+\hrule
+\vspace{4pt}
+
+\textbf{Task.} We replicate the Sudoku benchmark from \emph{S-FLM} (Deschenaux \& Gulcehre) under a fair,
+ground-truth protocol. Each example is a $9{\times}9$ puzzle laid out as a 180-token sequence
+\texttt{[BOS] puzzle(89) [BOS] solution(89)} over a 12-id vocabulary. The first 91 tokens (the puzzle prompt)
+are conditioned and excluded from the loss; the model must generate the 89-token solution suffix. Difficulty is
+set by clue count --- \textbf{easy}/\textbf{medium}/\textbf{hard} = 40/35/30 clues --- with a 48k-train / 2k-val
+split (seed 42, deduplicated, unique-solution). The metric is \emph{exact match}: the entire 89-token solution
+must be correct ($(\textrm{gen}=\textrm{gt}).\textrm{all}$). Vocab, layout, split, difficulty generator, and
+metric are byte-for-byte identical to S-FLM.
+
+\textbf{Method under test.} CoBit replaces S-FLM's hyperspherical token-embedding state with a fixed-width
+\emph{analog-bit} state (4 bits/token $\rightarrow$ 720-bit stream) and trains Gaussian bitstream diffusion
+(matched-filter residual, binary score matching, EDM weighting, entropy-rate noise schedule). The prompt is
+imposed by clamping the clean prompt bits at every solver step. Sampling uses the \texttt{ddim\_entropic} path
+(probability-flow on the entropy-rate $\sigma$-grid with EDM stochastic churn $s_{\mathrm{churn}}=\gamma(\mathrm{NFE}{-}1)$),
+the same sampler that produces CoBit's OWT GenPPL numbers. Trunk is matched to S-FLM (8 blocks / 512-d / 8 heads,
+20k steps, batch 256, AdamW lr $3\!\times\!10^{-4}$, NFE = 180).
+
+\textbf{Headline result.} Sweeping the diffusion temperature $\gamma$ (3 seeds, mean $\pm$ s.d.), CoBit
+\best{beats every published baseline on all three difficulties}, with the largest margin on \emph{hard}
+($+7.5$ pts over the strongest prior method):
+
+\begin{center}
+\small
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Method (180 NFE)} & \textbf{easy} & \textbf{medium} & \textbf{hard} \\
+\midrule
+\best{CoBit (best $\gamma$)}      & \best{98.5} & \best{91.7} & \best{65.9} \\
+Duo                                & 96.3 & 84.7 & 58.4 \\
+S-FLM (+trunc+adaptive)            & 94.8 & 85.2 & 45.0 \\
+FLM                                & 94.2 & 82.7 & 44.5 \\
+AR (greedy)                        & 14.6 & \phantom{0}5.1 & \phantom{0}1.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Temperature sweep (CoBit exact-match \%, mean over seeds 42/43/44).} Stochastic churn helps
+\emph{monotonically} and then plateaus near $\gamma\approx0.4$--$0.5$, so the optimum is bracketed. On hard,
+churn lifts accuracy by $+26$ pts over the deterministic ($\gamma{=}0$) probability-flow ablation --- the
+stochastic operating point is essential, not optional.
+
+\begin{center}
+\footnotesize
+\begin{tabular}{l c c c c c c c c}
+\toprule
+$\gamma$ & 0.0 (det.) & 0.05 & 0.10 & 0.15 & 0.20 & 0.30 & 0.40 & 0.50 \\
+\midrule
+easy   & 93.3 & 96.4 & 97.3 & 97.7 & 98.0 & 98.4 & \best{98.5} & 98.4 \\
+medium & 76.7 & 85.0 & 87.7 & 88.9 & 89.7 & 91.1 & 91.6 & \best{91.7} \\
+hard   & 40.2 & 53.5 & 58.6 & 61.4 & 63.0 & 64.6 & \best{65.9} & 65.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{-2pt}
+{\footnotesize\emph{Reporting note.} Numbers use the raw (running) weights. The EMA weights are reported as
+collapsed: at only 20k steps the EMA decay 0.9999 ($\sim$10k-step time constant) has not converged off the noisy
+early-training average, so EMA decoding falls out-of-vocabulary --- expected at this step count, not a defect.
+Seed variance is tight (s.d.\ $\le 1.3$\%).}
+
+\vspace{2pt}
+\hrule
+\vspace{4pt}
+
+{\large\bfseries Next: TinyGSM $\rightarrow$ GSM8K (prepared, ready to launch)}
+
+\textbf{Task.} The second S-FLM verifiable task: train on \texttt{TinyGSM/TinyGSM} (synthetic grade-school math
+with executable Python answers) and evaluate \emph{executable-code accuracy} on the 1{,}319 GSM8K test problems.
+Each example is \texttt{[BOS] question $\backslash$n code [EOS]}, tokenized with SmolLM-135M ($|V|=49152{+}\textrm{PAD}$),
+length 512; the question is conditioned and masked out of the loss. Scoring runs the generated
+\texttt{simple\_math\_problem} in a restricted math-only sandbox (1e-3 tolerance, 5\,s timeout) with a 95\%
+bootstrap CI --- the vendored S-FLM sandbox, unchanged.
+
+\textbf{CoBit setup.} 16 bits/token $\rightarrow$ \textbf{8192-bit} bitstream; trunk matched to S-FLM
+(12 blocks / 768-d / 12 heads), 250k steps, global batch 512, EMA 0.9999, AdamW lr $3\!\times\!10^{-4}$.
+Eval at NFE = 1024 (the paper's headline budget) with a small $\gamma$ sweep; bitstream decode that lands
+out-of-vocab ($\geq 49153$) is logged via an \texttt{invalid\_token\_rate} diagnostic.
+
+\textbf{Status \& plan.} Data pipeline, vendored GSM8K test set + sandbox, train/eval scripts, and config are
+in place and unit-tested; training has not yet started. We launch on Isambard (2 nodes $\times$ 4 GH200, DDP),
+then evaluate the 250k-step checkpoint.
+
+\vspace{1pt}
+{\footnotesize\textbf{Targets to match (GSM8K acc \%, T{=}1).} Non-AR diffusion band: MDLM 18.0, Duo 17.2,
+S-FLM(+adaptive+S-arch) 12.4, S-FLM(+top-k=1) 18.0, FLM 0.3; AR reference: greedy 63.3, sample 53.9.
+The fair first target for CoBit is the diffusion band ($\sim$17--18\%), reporting at the same NFE as the
+method being compared.}
+
+\end{document}

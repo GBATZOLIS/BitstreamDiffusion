@@ -1,0 +1,14 @@
+[sigma_data] sampling with sigma_data=0.4624  (source: trained value from sigma_data.json (0.4624))
+/home/gb511/BitstreamDiffusion/evaluation/tasks/_task_common.py:104: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(ckpt_path, map_location="cpu")
+/home/gb511/BitstreamDiffusion/data/sudoku.py:99: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(cache)
+✅ Instantiating SequenceVDTContinuousModel for framework: 'continuous_score'
+[task_eval] sampler = FeynmanKacEulerMaruyamaSampler
+[sudoku-fkc] 64/1000  pass@16=48 (75.0%)  maj@16=47 (73.4%)  min_ess=2.65
+[sudoku-fkc] 128/1000  pass@16=96 (75.0%)  maj@16=94 (73.4%)  min_ess=2.65
+[sudoku-fkc] 192/1000  pass@16=146 (76.0%)  maj@16=144 (75.0%)  min_ess=2.65
+[sudoku-fkc] 256/1000  pass@16=195 (76.2%)  maj@16=193 (75.4%)  min_ess=2.65
+[sudoku-fkc] 320/1000  pass@16=245 (76.6%)  maj@16=243 (75.9%)  min_ess=2.65
+[sudoku-fkc] 384/1000  pass@16=290 (75.5%)  maj@16=288 (75.0%)  min_ess=2.65
+[sudoku-fkc] 448/1000  pass@16=341 (76.1%)  maj@16=339 (75.7%)  min_ess=2.26

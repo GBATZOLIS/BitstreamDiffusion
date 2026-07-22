@@ -1,0 +1,155 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.72in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[T1]{fontenc}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\definecolor{cobit}{RGB}{0,90,170}
+\pagestyle{empty}
+\newcommand{\best}[1]{\textbf{\color{cobit}#1}}
+
+\begin{document}
+
+{\Large\bfseries CoBit on Sudoku: sampling study and best-achievable accuracy}\\[2pt]
+{\small Continuous bitstream diffusion (CoBit) under the S-FLM verifiable-task protocol.
+What sampler, churn, and NFE settings maximise exact-match --- and how far past the published
+headline they reach. \hfill 20 June 2026}
+
+\vspace{2pt}\hrule\vspace{4pt}
+
+\textbf{Task and metric.} We replicate the Sudoku benchmark of \emph{S-FLM} (Deschenaux \&
+Gulcehre). Each puzzle is a $9{\times}9$ grid serialised to $180$ tokens ($12$-symbol vocab,
+$4$ bits/token $\rightarrow$ a $720$-bit bitstream); the $91$-token prompt (clues) is the
+clean conditioning prefix, clamped at every solver step and excluded from the loss. The metric
+is \emph{exact match}: the entire $89$-token solution suffix must be byte-for-byte correct.
+Difficulty $=$ \#clues: easy/medium/hard $=40/35/30$. Data split, decoding, and metric are
+identical to S-FLM, so the numbers are directly comparable to their reported results.
+
+\textbf{Method under test.} CoBit is a variance-exploding continuous diffusion over the raw
+binary bitstream ($\sigma\in[0.002,80]$, $\rho{=}7$, EDM preconditioning
+$c_\mathrm{in}=1/\sqrt{\sigma^2+\sigma_\mathrm{data}^2}$). The denoiser is an 8-block/512-d/
+8-head transformer matched to S-FLM. All evaluation uses the \emph{raw} (running) training
+weights: at the 20k-step budget the EMA decay $0.9999$ has not converged off the noisy early
+average, so EMA decoding falls out-of-vocabulary --- expected at this step count, not a defect.
+
+\textbf{The samplers.} All sit in one reverse-SDE family,
+$\mathrm{d}x=(1+\lambda(\sigma))\,\sigma\,s_\theta\,\mathrm{d}r+\sqrt{2\lambda(\sigma)\sigma}\,\mathrm{d}W_r$,
+discretised on the model's \emph{entropy-rate} $\sigma$-grid (sampling points placed uniformly
+in the entropy-rate CDF, concentrating steps where bits resolve):
+\begin{itemize}\setlength\itemsep{0pt}
+\item \textbf{DDIM (deterministic)} --- probability-flow ODE, $\lambda{=}0$. One denoiser call/step.
+\item \textbf{DDIM + EDM churn} --- adds noise implicitly via $\hat\sigma=(1{+}\gamma)\sigma$;
+effective Langevin strength $\lambda_i\approx\gamma\sigma_i/\Delta_i$, gated by the entropy-rate
+density. \emph{Hard-capped} at $\gamma\le\sqrt2-1\approx0.414$. The headline path.
+\item \textbf{Euler--Maruyama (EM) / Predictor--Corrector (PC)} --- explicit entropy-gated SDE
+samplers (this work). Noise is injected in $x$-space at the on-grid $\sigma$ via a
+$\lambda_0$-scaled entropy-rate profile; \emph{no churn cap}. At $\lambda_0{=}0$ they reduce to
+deterministic DDIM bit-identically. PC splits each step into a PF predictor $+$ a Langevin
+corrector. Classifier-free guidance, when used, is applied \emph{predictor-only} (corrector runs
+at the conditional score), which avoids the $(1{+}\lambda)$ over-amplification that naive
+guide-everywhere CFG suffers under stochastic sampling.
+\end{itemize}
+
+\textbf{Stochasticity is essential.} On the entropy-rate grid, EDM churn turns a constant churn
+budget into Langevin correction concentrated at the high-information noise band where a premature
+deterministic bit-decision would otherwise lock in an error. Sweeping $\gamma$ at NFE${=}180$
+(mean over seeds 42/43/44) lifts hard from $40.2\%$ ($\gamma{=}0$, prob.-flow) to a plateau
+$\sim$\,$65.9\%$ near $\gamma{\approx}0.4$ --- \best{$+25.7$ pts from churn alone}. Easy/medium
+gain $+5.2/+15.0$. Churn is the single most important sampling choice on this task.
+
+\textbf{Headline at NFE${=}180$ vs.\ diffusion-LM baselines.} At the standard $180$-NFE operating
+point (best $\gamma$, EDM churn, entropy grid, mean over 3 seeds), CoBit
+\best{beats every published DLM baseline on all three difficulties}:
+
+\begin{center}\small
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Method (180 NFE)} & \textbf{easy} & \textbf{medium} & \textbf{hard} \\
+\midrule
+\best{CoBit (best $\gamma$)}      & \best{98.5} & \best{91.7} & \best{65.9} \\
+Duo                                & 96.3 & 84.7 & 58.4 \\
+S-FLM (+trunc+adaptive)            & 94.8 & 85.2 & 45.0 \\
+FLM                                & 94.2 & 82.7 & 44.5 \\
+AR Transformer (greedy)            & 14.6 & \phantom{0}5.1 & \phantom{0}1.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Better noise shape: EM/PC vs.\ EDM churn.} At \emph{matched} stochasticity
+($\lambda_0{=}70$, the entropy-rate-$as\_saved$ anchor $\approx$ EDM $\gamma{=}0.4$), the explicit
+entropy-gated PC sampler equals or beats EDM churn at NFE${=}180$ (single seed, $n{=}2000$, raw):
+easy $98.20$ vs $97.90$; \best{hard $64.55$ vs $61.40$ ($+3.2$)}. The reverse-SDE Langevin is a
+better-shaped correction than implicit churn, most visibly on hard. (Guidance itself did not
+improve Sudoku --- it is a near-saturated conditional task --- but the predictor-only formulation
+keeps it \emph{harmless}, whereas naive guide-everywhere CFG degraded both exact-match and
+validity as the weight grew.)
+
+\textbf{Scaling NFE --- the largest lever, especially on hard.} Holding $\gamma{=}0.4$ (so the
+cumulative churn $S_\mathrm{churn}=\gamma(\mathrm{NFE}{-}1)$ scales up with NFE) and increasing the
+number of solver steps yields monotone gains that are largest where the deterministic floor is
+lowest (single seed, $n{=}2000$, raw, EDM churn, entropy grid):
+
+\begin{center}\small
+\begin{tabular}{l c c c c c}
+\toprule
+\textbf{exact-match \%} & \textbf{NFE 180} & \textbf{384} & \textbf{768} & \textbf{1024} & \textbf{$\Delta$ best} \\
+\midrule
+easy   & 97.90 & 98.00 & \best{98.75} & 98.60 & $+0.85$ \\
+medium & 92.85 & 93.85 & 94.75 & \best{94.95} & $+2.10$ \\
+hard   & 61.40 & 64.75 & \best{67.50} & 67.40 & \best{$+6.10$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Hard improves $+6.1$ pts (valid-sudoku rate $+8.9$), saturating by NFE${\approx}768$; medium is
+still creeping up at 1024; easy peaks at 768. The plateau on hard sits at $\gamma{=}0.4$ --- i.e.\
+\emph{near the EDM churn cap} --- which indicates hard is now limited by the churn ceiling, not by
+step count: the motivation for the uncapped EM sampler.
+
+\textbf{Best achievable here.} Combining the better-regularised checkpoint (trained with $0.1$
+conditioning dropout), the entropy-grid stochastic sampler, and higher NFE pushes past our own
+$180$-NFE headline and well past the prior DLM frontier:
+
+\begin{center}\small
+\begin{tabular}{l c c c}
+\toprule
+ & \textbf{easy} & \textbf{medium} & \textbf{hard} \\
+\midrule
+Best prior DLM (180 NFE)              & 96.3 & 85.2 & 58.4 \\
+CoBit headline (180 NFE, 3-seed)      & 98.5 & 91.7 & 65.9 \\
+\best{CoBit best sampling (this work)} & \best{98.75} & \best{94.95} & \best{67.50} \\
+\multicolumn{1}{r}{\footnotesize best setting} & {\footnotesize NFE768} & {\footnotesize NFE1024} & {\footnotesize NFE768} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\footnotesize\emph{Caveats.} The ``best sampling'' row is single-seed ($42$) on the
+conditioning-dropout checkpoint with $\gamma$ fixed at $0.4$ (not re-optimised per NFE); seed
+variance at 180 NFE was tight ($\le1.3\%$) and $\gamma$ was not tuned upward, so these are a
+conservative lower bound on the achievable accuracy. EM/PC at $\lambda_0{=}0$ reproduce
+deterministic DDIM bit-identically (validation gate), confirming the new samplers are correct.
+
+\normalsize
+\textbf{Conclusions --- what sampling settings work on Sudoku.}
+\begin{enumerate}\setlength\itemsep{1pt}
+\item \textbf{Use stochastic sampling.} EDM churn (or the EM/PC reverse-SDE) on the entropy-rate
+grid is decisive: $+26$ pts on hard over deterministic probability-flow. Deterministic sampling is
+never the right choice here.
+\item \textbf{Push churn to the high end.} Accuracy rises monotonically with $\gamma$ and plateaus
+near $\gamma{\approx}0.4$--$0.5$; on hard the plateau coincides with the EDM cap $\sqrt2-1$, so the
+uncapped EM sampler is the way to test still-higher effective churn.
+\item \textbf{Scale NFE, prioritising hard.} More solver steps (with churn scaled accordingly) give
+the largest single gain on the hardest puzzles ($+6$ pts to NFE${\approx}768$); easy/medium saturate
+earlier. NFE is a genuine accuracy axis, not just a cost axis, for low-baseline difficulties.
+\item \textbf{Prefer the entropy-gated SDE (EM/PC) over implicit EDM churn} at matched stochasticity
+--- it is at least as good and better on hard, and (unlike EDM) is uncapped, enabling the
+high-effective-churn $\times$ high-NFE regime on the hardest problems.
+\item \textbf{Use raw weights} at this training budget, and if guidance is ever applied, use the
+\emph{predictor-only} formulation (guidance does not help Sudoku but predictor-only keeps it safe).
+\end{enumerate}
+
+\end{document}

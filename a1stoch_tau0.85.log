@@ -1,0 +1,43 @@
+[sigma_data] sampling with sigma_data=0.4624  (source: trained value from sigma_data.json (0.4624))
+/home/gb511/BitstreamDiffusion/evaluation/tasks/_task_common.py:101: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(ckpt_path, map_location="cpu")
+/home/gb511/BitstreamDiffusion/data/sudoku.py:99: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(cache)
+✅ Instantiating SequenceVDTContinuousModel for framework: 'continuous_score'
+[task_eval] sampler = DDIMSampler
+[sudoku] 256/2000  exact=172  (67.2%)
+[sudoku] 512/2000  exact=349  (68.2%)
+[sudoku] 768/2000  exact=517  (67.3%)
+[sudoku] 1024/2000  exact=684  (66.8%)
+[sudoku] 1280/2000  exact=861  (67.3%)
+[sudoku] 1536/2000  exact=1029  (67.0%)
+[sudoku] 1792/2000  exact=1189  (66.4%)
+[sudoku] 2000/2000  exact=1325  (66.2%)
+
+=== SUDOKU RESULT ===
+{
+  "task": "sudoku",
+  "difficulty": "hard",
+  "checkpoint": "runs/tasks/sudoku/hard/cobit_raw_binary_bits/checkpoints/step=000020000.pt",
+  "sampler": "stochastic",
+  "gamma": 0.5,
+  "ema": false,
+  "steps": 180,
+  "guidance_scale": 0.0,
+  "sampler_kind": "ddim",
+  "lambda_zero": 0.0,
+  "lambda_profile": "entropy_rate",
+  "lambda_normalize": "as_saved",
+  "guidance_mode": "predictor_only",
+  "score_temp_tau": 0.85,
+  "score_temp_clean_var": 0.25,
+  "sigma_data": 0.4624,
+  "num_examples": 2000,
+  "exact_match_accuracy": 0.6625,
+  "grid_exact_match": 0.6625,
+  "valid_sudoku_rate": 0.694,
+  "clue_consistency_rate": 0.6625,
+  "separator_accuracy": 1.0,
+  "invalid_token_rate": 7.303370786516854e-05
+}
+saved -> /home/gb511/BitstreamDiffusion/runs/tasks/sudoku/hard/cobit_raw_binary_bits/sudoku_eval/sudoku_results_hard_stochastic_g0.5_s180_sd0.4624_w0_ema0_tau0.85.json

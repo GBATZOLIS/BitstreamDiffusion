@@ -1,0 +1,36 @@
+[sigma_data] sampling with sigma_data=0.4624  (source: trained value from sigma_data.json (0.4624))
+/home/gb511/BitstreamDiffusion/evaluation/tasks/_task_common.py:103: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(ckpt_path, map_location="cpu")
+/home/gb511/BitstreamDiffusion/data/sudoku.py:99: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(cache)
+✅ Instantiating SequenceVDTContinuousModel for framework: 'continuous_score'
+[task_eval] sampler = FeynmanKacEulerMaruyamaSampler
+[sudoku-fkc] 32/2000  pass@32=25 (78.1%)  maj@32=23 (71.9%)  min_ess=32.00
+[sudoku-fkc] 64/2000  pass@32=52 (81.2%)  maj@32=49 (76.6%)  min_ess=32.00
+[sudoku-fkc] 96/2000  pass@32=74 (77.1%)  maj@32=69 (71.9%)  min_ess=32.00
+[sudoku-fkc] 128/2000  pass@32=98 (76.6%)  maj@32=91 (71.1%)  min_ess=32.00
+[sudoku-fkc] 160/2000  pass@32=127 (79.4%)  maj@32=120 (75.0%)  min_ess=32.00
+[sudoku-fkc] 192/2000  pass@32=151 (78.6%)  maj@32=141 (73.4%)  min_ess=32.00
+[sudoku-fkc] 224/2000  pass@32=179 (79.9%)  maj@32=168 (75.0%)  min_ess=32.00
+[sudoku-fkc] 256/2000  pass@32=203 (79.3%)  maj@32=189 (73.8%)  min_ess=32.00
+[sudoku-fkc] 288/2000  pass@32=232 (80.6%)  maj@32=216 (75.0%)  min_ess=32.00
+[sudoku-fkc] 320/2000  pass@32=261 (81.6%)  maj@32=242 (75.6%)  min_ess=32.00
+[sudoku-fkc] 352/2000  pass@32=281 (79.8%)  maj@32=262 (74.4%)  min_ess=32.00
+[sudoku-fkc] 384/2000  pass@32=304 (79.2%)  maj@32=284 (74.0%)  min_ess=32.00
+[sudoku-fkc] 416/2000  pass@32=330 (79.3%)  maj@32=310 (74.5%)  min_ess=32.00
+[sudoku-fkc] 448/2000  pass@32=357 (79.7%)  maj@32=334 (74.6%)  min_ess=32.00
+[sudoku-fkc] 480/2000  pass@32=384 (80.0%)  maj@32=360 (75.0%)  min_ess=32.00
+[sudoku-fkc] 512/2000  pass@32=402 (78.5%)  maj@32=378 (73.8%)  min_ess=32.00
+[sudoku-fkc] 544/2000  pass@32=427 (78.5%)  maj@32=401 (73.7%)  min_ess=32.00
+[sudoku-fkc] 576/2000  pass@32=454 (78.8%)  maj@32=427 (74.1%)  min_ess=32.00
+[sudoku-fkc] 608/2000  pass@32=482 (79.3%)  maj@32=454 (74.7%)  min_ess=32.00
+[sudoku-fkc] 640/2000  pass@32=510 (79.7%)  maj@32=481 (75.2%)  min_ess=32.00
+[sudoku-fkc] 672/2000  pass@32=535 (79.6%)  maj@32=504 (75.0%)  min_ess=32.00
+[sudoku-fkc] 704/2000  pass@32=561 (79.7%)  maj@32=527 (74.9%)  min_ess=32.00
+[sudoku-fkc] 736/2000  pass@32=585 (79.5%)  maj@32=550 (74.7%)  min_ess=32.00
+[sudoku-fkc] 768/2000  pass@32=605 (78.8%)  maj@32=569 (74.1%)  min_ess=32.00
+[sudoku-fkc] 800/2000  pass@32=629 (78.6%)  maj@32=589 (73.6%)  min_ess=32.00
+[sudoku-fkc] 832/2000  pass@32=656 (78.8%)  maj@32=615 (73.9%)  min_ess=32.00
+[sudoku-fkc] 864/2000  pass@32=677 (78.4%)  maj@32=635 (73.5%)  min_ess=32.00
+[sudoku-fkc] 896/2000  pass@32=699 (78.0%)  maj@32=657 (73.3%)  min_ess=32.00
+[sudoku-fkc] 928/2000  pass@32=724 (78.0%)  maj@32=679 (73.2%)  min_ess=32.00
