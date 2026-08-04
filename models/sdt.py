@@ -748,6 +748,22 @@ class SequenceVDTContinuousModel(nn.Module):
         else:
             raise ValueError(f"Unsupported representation/framework combination: {cfg.framework}, {self.representation}")
 
+        # ---- multimodal protein path (opt-in; sequence path is unchanged when off) ----
+        # When cfg.model.multimodal is set the model accepts a per-bit sigma map,
+        # per-residue modality states, and two modality noise levels, and adds
+        # learned intra-patch slot and modality-state embeddings. All of this is
+        # inert unless the caller passes the extra kwargs, so the sequence-only
+        # forward remains byte-for-byte identical.
+        self.multimodal = bool(getattr(cfg.model, "multimodal", False))
+        if self.multimodal:
+            if not self.is_continuous_bits:
+                raise ValueError("cfg.model.multimodal requires continuous binary representation")
+            from models.protein_multimodal import MultimodalBitEmbeddings
+
+            self.mm_embed = MultimodalBitEmbeddings(self.C, patch_size=self.P)
+        else:
+            self.mm_embed = None
+
         # ---- positional features ----
         self.n_fourier_global = int(getattr(cfg.model, "n_fourier_global", 8))
         self.n_fourier_local = int(getattr(cfg.model, "n_fourier_local", 4))
@@ -973,8 +989,11 @@ class SequenceVDTContinuousModel(nn.Module):
         return logits
 
     def _build_continuous_embed_1ch(self, x: torch.Tensor, c_in: torch.Tensor) -> torch.Tensor:
-        """x: [B,S] -> [B,S,C]"""
-        x_scaled = x * c_in.view(-1, 1)
+        """x: [B,S] -> [B,S,C]. c_in is either a per-example [B] or per-bit [B,S] scale."""
+        if c_in.dim() == x.dim():  # per-bit matched-filter scaling (multimodal)
+            x_scaled = x * c_in
+        else:
+            x_scaled = x * c_in.view(-1, 1)
         if self.cont_input_proj is None:
             return x_scaled.unsqueeze(-1)
         return self.cont_input_proj(x_scaled.unsqueeze(-1))
@@ -984,14 +1003,19 @@ class SequenceVDTContinuousModel(nn.Module):
         x_t: torch.Tensor,
         sigma: torch.Tensor,
         x0_hat: Optional[torch.Tensor],
+        state_ids: Optional[torch.Tensor] = None,
     ):
         sigma_data = float(self.cfg.diffusion.continuous.sigma_data)
+        # sigma may be per-example [B] or, in the multimodal path, a per-bit map
+        # [B,S] so sequence and structure bits are scaled by their own noise.
         c_in = 1.0 / (sigma.pow(2) + sigma_data**2).sqrt()
 
         x_noisy = x_t.float()
         if self.center_inputs:
             x_noisy = x_noisy - self.data_center
         noisy_emb = self._build_continuous_embed_1ch(x_noisy, c_in)
+        if self.mm_embed is not None:
+            noisy_emb = self.mm_embed(noisy_emb, state_ids)
 
         if not self.self_condition:
             content = noisy_emb
@@ -1064,14 +1088,30 @@ class SequenceVDTContinuousModel(nn.Module):
         x_t: torch.Tensor,
         sigma: torch.Tensor,
         x0_hat: Optional[torch.Tensor] = None,
+        *,
+        slot_state: Optional[torch.Tensor] = None,
+        modality_sigmas: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Shapes:
           - discrete tokens/bits:   x_t [B,S]
           - continuous bits:        x_t [B,S]
           - continuous one-hot:     x_t [B,S,V]
+
+        Multimodal (opt-in) extras, ignored unless cfg.model.multimodal:
+          - sigma: per-bit noise map [B,S] instead of the per-example [B];
+          - modality_sigmas: [B,2] (sigma_seq, sigma_struct) for time conditioning;
+          - slot_state: [B,L,2] per-residue modality states for slot/state embeds.
         """
-        if sigma.dim() != 1 or x_t.size(0) != sigma.size(0):
+        multimodal_call = (
+            self.multimodal and (modality_sigmas is not None or slot_state is not None)
+        )
+        if multimodal_call:
+            if x_t.size(0) != sigma.size(0):
+                raise RuntimeError("Expected x_t batch dimension to match sigma")
+            if sigma.dim() not in (1, 2):
+                raise RuntimeError("Multimodal sigma must be [B] or a per-bit map [B,S]")
+        elif sigma.dim() != 1 or x_t.size(0) != sigma.size(0):
             raise RuntimeError("Expected x_t batch dimension to match sigma [B]")
 
         if self.is_discrete_tokens or self.is_discrete_bits:
@@ -1083,7 +1123,14 @@ class SequenceVDTContinuousModel(nn.Module):
             if x_t.dim() != 2:
                 raise RuntimeError("Continuous bit runs expect x_t with shape [B,S]")
             b, s_orig = x_t.shape
-            content, x_skip = self._build_content_continuous_bits(x_t, sigma, x0_hat)
+            state_ids = None
+            if self.mm_embed is not None and slot_state is not None:
+                from models.protein_multimodal import build_state_ids_from_states
+
+                state_ids = build_state_ids_from_states(slot_state)
+            content, x_skip = self._build_content_continuous_bits(
+                x_t, sigma, x0_hat, state_ids=state_ids
+            )
         elif self.is_continuous_tokens:
             if x_t.dim() != 3:
                 raise RuntimeError("Continuous token runs expect x_t with shape [B,S,V]")
@@ -1108,7 +1155,15 @@ class SequenceVDTContinuousModel(nn.Module):
         tokens_in, n = self._patchify(x_pad)
         tokens = self.patch_proj(tokens_in)
 
-        t_emb = self.time_cond(self.time_proj(self.time_fn(sigma)))
+        if multimodal_call and modality_sigmas is not None:
+            from models.protein_multimodal import two_modality_time_sigma
+
+            t_base = two_modality_time_sigma(
+                self.time_fn, modality_sigmas[:, 0], modality_sigmas[:, 1]
+            )
+            t_emb = self.time_cond(self.time_proj(t_base))
+        else:
+            t_emb = self.time_cond(self.time_proj(self.time_fn(sigma)))
         attn_bias = None if self.rpb is None else self.rpb(n, device=tokens.device, dtype=tokens.dtype)
 
         for blk in self.blocks:

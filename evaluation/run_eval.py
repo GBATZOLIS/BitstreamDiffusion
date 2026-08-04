@@ -41,8 +41,6 @@ from evaluation.evaluation_drivers.utils import (
 from evaluation.evaluation_drivers.likelihood import evaluate_likelihood
 from evaluation.evaluation_drivers.vlb import evaluate_vlb
 from evaluation.evaluation_drivers.external_ppl import evaluate_external_ppl
-from evaluation.evaluation_drivers.fid_sweep import evaluate_fid_sweep
-from evaluation.evaluation_drivers.fid import evaluate_fid
 from evaluation.evaluation_drivers.mauve import evaluate_mauve
 from evaluation.evaluation_drivers.generate_samples import evaluate_generate_samples
 
@@ -53,6 +51,7 @@ from evaluation.evaluation_drivers.generate_samples import evaluate_generate_sam
 def main():
     ap = argparse.ArgumentParser("Unified evaluation for discrete & continuous diffusion")
     ap.add_argument("--config", required=True, help="Path to config file")
+    ap.add_argument("--checkpoint", default=None, help="Override evaluation checkpoint path")
 
     ap.add_argument(
         "--metrics", nargs="+", default=["bpc"],
@@ -84,6 +83,13 @@ def main():
     ap.add_argument("--vlb_sigma_max", type=float, default=None)
     ap.add_argument("--vlb_mc", type=int, default=None)
     ap.add_argument("--vlb_include_prior", action="store_true")
+    ap.add_argument(
+        "--vlb_position_scopes",
+        nargs="+",
+        default=["storage"],
+        choices=["storage", "nonpad", "residue"],
+        help="Positions included in VLB normalization (protein datasets expose masks)",
+    )
 
     # MAUVE Arguments
     ap.add_argument("--mauve_checkpoints", nargs="+", default=None, help="Override MAUVE checkpoints list")
@@ -116,6 +122,8 @@ def main():
 
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.checkpoint is not None:
+        cfg.evaluation.checkpoint_path = str(args.checkpoint)
 
     # --- Compilation Settings Logic ---
     # Priority: 1. CLI args -> 2. cfg.evaluation.use_compile -> 3. cfg.train.use_compile
@@ -270,9 +278,11 @@ def main():
         )
 
     if "fid_sweep" in args.metrics:
+        from evaluation.evaluation_drivers.fid_sweep import evaluate_fid_sweep
         evaluate_fid_sweep(args, cfg, model, test_loader, device, rank0, ddp_active, samples_dir, is_text_dataset)
 
     if "fid" in args.metrics:
+        from evaluation.evaluation_drivers.fid import evaluate_fid
         evaluate_fid(
             args, cfg, model, ema, use_ema, test_loader, train_loader, device,
             rank0, ddp_active, dist_info, samples_dir, fid_splits, run_meta,

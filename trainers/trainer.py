@@ -4,6 +4,7 @@ import os
 # Fix for some torch.compile interactions with CUDA Graphs
 os.environ.setdefault("TORCHINDUCTOR_DISABLE_CUDAGRAPHS", "1")
 
+import contextlib
 import math
 import random
 import json
@@ -22,6 +23,8 @@ from utils.tb_manager import TBManager
 from tqdm import tqdm
 
 from data import get_dataloaders
+from data.proteins import get_dima_loader
+from data.uniref50 import get_evodiff_uniref50_loader
 from models import create_model
 from utils.ema import EMA
 from utils.optim import get_optimizer_and_scheduler
@@ -105,6 +108,120 @@ def _enable_flash_sdp():
 
 def _ddp_is_on() -> bool:
     return dist.is_available() and dist.is_initialized()
+
+
+def _atomic_torch_save(state, final_path) -> None:
+    """Write a checkpoint to a temp sibling then atomically rename it into place.
+
+    A preemption or crash mid-write then leaves the previous checkpoint intact
+    rather than a truncated file, matching how last.pt is already written.
+    """
+    final_path = Path(final_path)
+    tmp_path = final_path.with_name(final_path.name + ".tmp")
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, final_path)
+
+
+def _mm_replay_task_weights(cfg) -> Dict[str, float]:
+    """Task weights for the sequence-only replay loader.
+
+    Replay rows carry a sequence but no structure (struct_mask all False), so a
+    paired or structure-target task would leave the batch with no supervised bits.
+    A sequence-producing mix keeps every replay step reinforcing the warm-started
+    sequence model. Honours ``cfg.data.replay_task_weights`` when set, else uses a
+    pure sequence-marginal draw.
+    """
+    override = getattr(cfg.data, "replay_task_weights", None)
+    if override is not None:
+        return {str(k): float(v) for k, v in dict(override).items()}
+    return {"sequence_marginal": 1.0}
+
+
+_MM_VAL_SIGMA_EDGES = (0.002, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 80.0)
+
+
+def _ema_decay_for_step(start: float, end: float, ramp_steps: int, step: int) -> float:
+    """Linear EMA-decay ramp, clamped at both endpoints."""
+    if ramp_steps <= 0:
+        return float(end)
+    frac = min(max(float(step) / float(ramp_steps), 0.0), 1.0)
+    return float(start + frac * (end - start))
+
+
+def _mm_sigma_bin_label(lo: float, hi: float) -> str:
+    def _part(value: float) -> str:
+        return f"{value:g}".replace(".", "p")
+    return f"{_part(lo)}_{_part(hi)}"
+
+
+def _mm_validation_accumulator(device, tasks) -> Dict[str, torch.Tensor]:
+    prefixes = [f"validation/modality/{m}" for m in ("seq", "struct")]
+    prefixes += [
+        f"validation/task/{task}/{modality}"
+        for task in sorted(tasks)
+        for modality in ("seq", "struct")
+    ]
+    prefixes += [
+        f"validation/sigma/{modality}/{_mm_sigma_bin_label(lo, hi)}"
+        for modality in ("seq", "struct")
+        for lo, hi in zip(_MM_VAL_SIGMA_EDGES[:-1], _MM_VAL_SIGMA_EDGES[1:])
+    ]
+    # [EDM-weighted error sum, unweighted MSE sum, correct-bit sum, bit count]
+    return {p: torch.zeros(4, device=device, dtype=torch.float64) for p in prefixes}
+
+
+def _mm_accumulate_validation(
+    stats: Dict[str, torch.Tensor], diagnostics: Dict[str, object], task_names
+) -> None:
+    device = next(iter(stats.values())).device
+    task_names = list(task_names)
+
+    def _add(prefix: str, modality: str, select: torch.Tensor) -> None:
+        count = diagnostics[f"{modality}_count"].to(device=device, dtype=torch.float64)
+        select = select.to(device=device, dtype=torch.bool) & (count > 0)
+        if not bool(select.any()):
+            return
+        stats[prefix][0] += diagnostics[f"{modality}_edm_sum"].to(device, torch.float64)[select].sum()
+        stats[prefix][1] += diagnostics[f"{modality}_mse_sum"].to(device, torch.float64)[select].sum()
+        stats[prefix][2] += diagnostics[f"{modality}_correct_sum"].to(device, torch.float64)[select].sum()
+        stats[prefix][3] += count[select].sum()
+
+    batch_size = len(task_names)
+    all_rows = torch.ones(batch_size, device=device, dtype=torch.bool)
+    for modality in ("seq", "struct"):
+        _add(f"validation/modality/{modality}", modality, all_rows)
+
+    for task in sorted(set(task_names)):
+        rows = torch.tensor([name == task for name in task_names], device=device)
+        for modality in ("seq", "struct"):
+            prefix = f"validation/task/{task}/{modality}"
+            if prefix in stats:
+                _add(prefix, modality, rows)
+
+    for modality in ("seq", "struct"):
+        sigma = diagnostics[f"sigma_{modality}"].to(device=device)
+        for index, (lo, hi) in enumerate(zip(_MM_VAL_SIGMA_EDGES[:-1], _MM_VAL_SIGMA_EDGES[1:])):
+            rows = (sigma >= lo) & (sigma <= hi if index == len(_MM_VAL_SIGMA_EDGES) - 2 else sigma < hi)
+            prefix = f"validation/sigma/{modality}/{_mm_sigma_bin_label(lo, hi)}"
+            _add(prefix, modality, rows)
+
+
+def _mm_finalize_validation(stats: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    for prefix, values in stats.items():
+        count = float(values[3].item())
+        if count <= 0.0:
+            continue
+        metrics[f"{prefix}/edm_loss"] = float(values[0].item() / count)
+        metrics[f"{prefix}/mse"] = float(values[1].item() / count)
+        metrics[f"{prefix}/bit_acc"] = float(values[2].item() / count)
+        metrics[f"{prefix}/target_bits"] = count
+
+    seq = metrics.get("validation/modality/seq/mse")
+    struct = metrics.get("validation/modality/struct/mse")
+    if seq is not None and struct is not None:
+        metrics["validation/balanced_mse"] = 0.5 * (seq + struct)
+    return metrics
 
 
 def _maybe_set_seed(cfg):
@@ -756,29 +873,92 @@ class Trainer:
         # ── W&B init (optional) ─────────────────────────────────────────────
         logging_cfg = getattr(cfg, "logging", None)
         self.use_wandb: bool = False
+        # When True, every TensorBoard write (scalars, figures, images,
+        # histograms, text) from the trainer AND all callbacks is mirrored to
+        # W&B automatically, so a run is fully readable in W&B without a
+        # per-metric _log_wandb call. In that mode the explicit _log_wandb calls
+        # stand down (see _log_wandb) to avoid duplicate, step-conflicting series.
+        self._wandb_sync_tb: bool = False
+        # Running (EMA) smoothing of the noisy per-step train loss for logging.
+        self._loss_ema: Optional[float] = None
 
-        if self.is_master and logging_cfg is not None and getattr(logging_cfg, "use_wandb", False):
+        # WANDB_MODE=disabled/dryrun is a hard off, honoured regardless of config.
+        _wandb_hard_off = os.environ.get("WANDB_MODE", "").lower() in (
+            "disabled",
+            "dryrun",
+        )
+        if (
+            self.is_master
+            and logging_cfg is not None
+            and getattr(logging_cfg, "use_wandb", False)
+            and not _wandb_hard_off
+        ):
             if WANDB_AVAILABLE:
                 self.use_wandb = True
                 os.environ["WANDB_PYTORCH_DISABLE"] = "true"
                 os.environ["WANDB_DISABLE_GRADIENTS"] = "true"
 
                 cfg_dict = _cfg_to_dict(cfg)
-                project = getattr(logging_cfg, "project", "diffusion")
-                entity = getattr(logging_cfg, "entity", None)
-                mode = getattr(logging_cfg, "mode", "online")
-                run_name = cfg.experiment
+                # Environment variables win over config so a run can be redirected
+                # or switched to offline without editing the config.
+                project = os.environ.get("WANDB_PROJECT") or getattr(logging_cfg, "project", "diffusion")
+                entity = os.environ.get("WANDB_ENTITY") or getattr(logging_cfg, "entity", None)
+                mode = os.environ.get("WANDB_MODE") or getattr(logging_cfg, "mode", "online")
+                group = getattr(logging_cfg, "group", None)
+                tags = getattr(logging_cfg, "tags", None)
+                # W&B display name defaults to the experiment (= run dir), but can
+                # be set independently via cfg.logging.run_name or WANDB_NAME.
+                run_name = (
+                    os.environ.get("WANDB_NAME")
+                    or getattr(logging_cfg, "run_name", None)
+                    or cfg.experiment
+                )
+                # Default on: mirror the full TensorBoard stream into W&B. The
+                # SafeSummaryWriter is created after this init (in
+                # prepare_for_run), so wandb's writer patch is active in time.
+                self._wandb_sync_tb = bool(
+                    getattr(logging_cfg, "sync_tensorboard", True)
+                )
 
                 wandb.init(
                     project=project,
                     entity=entity,
-                    id=logging_cfg.run_id,
+                    id=getattr(logging_cfg, "run_id", None),
                     resume="allow",
                     name=run_name,
+                    group=group,
+                    tags=list(tags) if tags else None,
                     config=cfg_dict,
                     dir=str(self.run_dir),
                     mode=mode,
+                    sync_tensorboard=self._wandb_sync_tb,
                 )
+                if wandb.run is not None:
+                    print(f"W&B run: {wandb.run.get_url()}")
+                    if self._wandb_sync_tb:
+                        print(
+                            "W&B: mirroring all TensorBoard metrics/figures/images "
+                            "into this run (sync_tensorboard=True)."
+                        )
+                    # Persist the run identity so a later eval process can resume
+                    # this exact run and attach eval metrics to it (see
+                    # utils/wandb_eval.log_eval_metrics).
+                    try:
+                        (self.run_dir / "wandb_run.json").write_text(
+                            json.dumps(
+                                {
+                                    "id": wandb.run.id,
+                                    "entity": wandb.run.entity,
+                                    "project": wandb.run.project,
+                                    "name": wandb.run.name,
+                                    "url": wandb.run.get_url(),
+                                },
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        pass
             else:
                 print("⚠️  wandb not installed, skipping W&B logging.")
 
@@ -791,6 +971,8 @@ class Trainer:
 
         self.best_metric = math.inf if self.checkpoint_mode == "min" else -math.inf
         self.best_ckpts: List[dict] = []
+        self.early_stop_best = self.best_metric
+        self.early_stop_bad_epochs = 0
 
         # periodic interval checkpoints (post-training analysis)
         self.ckpt_interval_enabled = bool(ck["interval_enabled"])
@@ -806,10 +988,140 @@ class Trainer:
 
 
         # ── data ────────────────────────────────────────────────────────────
-        raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
         dl_kw = _dataloader_kwargs(cfg)
 
-        if self.ddp_active:
+        dataset_name = str(getattr(cfg.data, "dataset", "")).lower()
+        is_dima_length_bucketed = dataset_name in {
+            "swissprotdima",
+            "swissprot_dima",
+            "dima_swissprot",
+        }
+        is_evodiff_length_bucketed = dataset_name in {
+            "evodiffuniref50",
+            "evodiff_uniref50",
+            "uniref50_evodiff",
+        }
+        is_multimodal = dataset_name in {
+            "proteinmultimodallfq",
+            "protein_multimodal",
+            "dplm_paired",
+        }
+        # Multimodal state (kept harmless / off for every non-multimodal path).
+        self.is_multimodal = bool(is_multimodal)
+        self.replay_fraction = 0.0
+        self.replay_loader = None
+        self._replay_iter = None
+        self._last_mm_components = None
+        self._last_mm_val_diagnostics = None
+
+        if not (
+            is_dima_length_bucketed or is_evodiff_length_bucketed or is_multimodal
+        ):
+            raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
+
+        if is_multimodal:
+            # Keep the paired multimodal loaders exactly as built: the custom
+            # source/length batch sampler and the task-aware collator (which
+            # yields dict batches with x0/states/target masks) must survive, so
+            # never rebuild a plain DataLoader from `.dataset` here.
+            from data.protein_multimodal import get_multimodal_loader
+
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be divisible by "
+                    f"world_size ({self.world_size})."
+                )
+                local_batch_size = cfg.train.batch_size // self.world_size
+            else:
+                local_batch_size = int(cfg.train.batch_size)
+            mm_seed = int(getattr(cfg.train, "seed", 42))
+            self.train_loader = get_multimodal_loader(
+                cfg, split="train", batch_size=local_batch_size, shuffle=True, seed=mm_seed
+            )
+            self.val_loader = get_multimodal_loader(
+                cfg, split="val", batch_size=local_batch_size, shuffle=False, seed=mm_seed
+            )
+            # Optional token-budgeted sequence-only UniRef50 replay (plan 6.6 step 3).
+            # A separate paired-format shard set of sequence-only rows (struct_mask
+            # all False) mixed by `sequence_replay_fraction`; batches are the same
+            # dict format so the multimodal step consumes them transparently.
+            self.replay_fraction = float(
+                getattr(cfg.data, "sequence_replay_fraction", 0.0) or 0.0
+            )
+            replay_root = str(getattr(cfg.data, "sequence_replay_root", "") or "")
+            replay_ready = bool(replay_root) and (
+                Path(replay_root) / "manifest.json"
+            ).exists()
+            if self.replay_fraction > 0.0 and replay_ready:
+                # Build the replay loader over the sequence-only corpus. The corpus
+                # has a single source ("uniref50") that is absent from the paired
+                # source_weights, so pass source_weights=None (equal weighting over
+                # present sources) to avoid a zero-total-weight sampler error. Force
+                # a sequence-producing task mix so every replay example supervises
+                # its sequence bits (structure is ABSENT on these rows, so paired or
+                # structure-target tasks would waste the replay batch).
+                orig_shard = cfg.data.shard_dir
+                orig_src_w = getattr(cfg.data, "source_weights", None)
+                orig_task_w = getattr(cfg.data, "task_weights", None)
+                cfg.data.shard_dir = replay_root
+                cfg.data.source_weights = None
+                cfg.data.task_weights = _mm_replay_task_weights(cfg)
+                try:
+                    self.replay_loader = get_multimodal_loader(
+                        cfg,
+                        split="train",
+                        batch_size=local_batch_size,
+                        shuffle=True,
+                        seed=mm_seed + 101,
+                    )
+                finally:
+                    cfg.data.shard_dir = orig_shard
+                    cfg.data.source_weights = orig_src_w
+                    cfg.data.task_weights = orig_task_w
+            elif self.replay_fraction > 0.0 and self.is_master:
+                reason = (
+                    "no cfg.data.sequence_replay_root set"
+                    if not replay_root
+                    else f"no manifest.json under sequence_replay_root {replay_root!r} "
+                    "(build it with scripts/proteins/setup/prepare_uniref50_replay.py)"
+                )
+                print(
+                    f"[multimodal] sequence_replay_fraction>0 but {reason}; "
+                    "replay disabled."
+                )
+                self.replay_fraction = 0.0
+            elif self.replay_fraction > 0.0:
+                # Non-master ranks must agree on the disabled state to stay in sync.
+                self.replay_fraction = 0.0
+        elif is_dima_length_bucketed or is_evodiff_length_bucketed:
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be divisible by "
+                    f"world_size ({self.world_size})."
+                )
+                local_batch_size = cfg.train.batch_size // self.world_size
+            else:
+                local_batch_size = int(cfg.train.batch_size)
+            protocol_loader = (
+                get_evodiff_uniref50_loader
+                if is_evodiff_length_bucketed
+                else get_dima_loader
+            )
+            self.train_loader = protocol_loader(
+                cfg,
+                split="train",
+                batch_size=local_batch_size,
+                shuffle=True,
+                seed=int(getattr(cfg.train, "seed", 42)),
+            )
+            self.val_loader = protocol_loader(
+                cfg,
+                split="val",
+                batch_size=local_batch_size,
+                shuffle=False,
+                seed=int(getattr(cfg.train, "seed", 42)),
+            )
+        elif self.ddp_active:
             assert cfg.train.batch_size % self.world_size == 0, (
                 f"Global batch_size ({cfg.train.batch_size}) must be divisible by world_size "
                 f"({self.world_size}) for fixed-shape DDP training."
@@ -880,11 +1192,19 @@ class Trainer:
                 base = torch.nn.SyncBatchNorm.convert_sync_batchnorm(base)
             except Exception:
                 pass
+            # The multimodal warm-start curriculum freezes the trunk for the first
+            # N steps (requires_grad=False) AFTER this DDP wrap, so those params
+            # stop producing gradients mid-run. DDP's default reducer
+            # (find_unused_parameters=False) would then error; enable unused-param
+            # handling whenever a freeze window is configured.
+            mm_freeze = self.is_multimodal and (
+                int(getattr(cfg.model, "warm_start_freeze_trunk_steps", 0) or 0) > 0
+            )
             base = DDP(
                 base,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
-                find_unused_parameters=False,
+                find_unused_parameters=bool(mm_freeze),
             )
 
         compile_enabled = bool(getattr(self.cfg.train, "use_compile", False))
@@ -905,9 +1225,63 @@ class Trainer:
 
         self.model = base
 
+        # ── gradient accumulation ──────────────────────────────────────────
+        # Accumulate this many micro-batches into one optimizer step so the
+        # effective global batch (in residue-patches) is held constant as the
+        # node/GPU count changes. 1 == the previous single-step behavior.
+        self.grad_accum_steps = max(
+            1, int(getattr(cfg.train, "grad_accum_steps", 1) or 1)
+        )
+        self._accum_counter = 0
+        self._did_optim_step = True
+
+        # ── multimodal warm-start / curriculum knobs (gate 3) ──────────────
+        self.freeze_trunk_steps = int(
+            getattr(cfg.model, "warm_start_freeze_trunk_steps", 0) or 0
+        )
+        self.trunk_lr_mult = float(
+            getattr(cfg.model, "warm_start_trunk_lr_mult", 1.0) or 1.0
+        )
+        self.warm_start_seq_checkpoint = str(
+            getattr(cfg.model, "warm_start_seq_checkpoint", "") or ""
+        )
+        self._trunk_frozen = False
+        # A dedicated lower-LR trunk group is only worth its resume complexity
+        # when the multimodal path actually asks for a different trunk LR.
+        self._trunk_group_active = bool(
+            self.is_multimodal and abs(self.trunk_lr_mult - 1.0) > 1e-9
+        )
+
         # ── opt / ema / amp ────────────────────────────────────────────────
         self.ema = EMA(self.model, decay=cfg.train.ema_decay)
-        self.opt, self.lr_sched = get_optimizer_and_scheduler(self.model, cfg, 0)
+        ema_ramp_cfg = getattr(cfg.train, "ema_ramp", None)
+        self.ema_ramp_enabled = bool(
+            getattr(ema_ramp_cfg, "enabled", False) if ema_ramp_cfg is not None else False
+        )
+        self.ema_ramp_start = float(
+            getattr(ema_ramp_cfg, "start_decay", cfg.train.ema_decay)
+            if ema_ramp_cfg is not None else cfg.train.ema_decay
+        )
+        self.ema_ramp_end = float(
+            getattr(ema_ramp_cfg, "end_decay", cfg.train.ema_decay)
+            if ema_ramp_cfg is not None else cfg.train.ema_decay
+        )
+        self.ema_ramp_steps = int(
+            getattr(ema_ramp_cfg, "steps", 0) if ema_ramp_cfg is not None else 0
+        )
+        if self.ema_ramp_enabled:
+            self.ema.decay = _ema_decay_for_step(
+                self.ema_ramp_start, self.ema_ramp_end, self.ema_ramp_steps, 0
+            )
+        if self._trunk_group_active:
+            # Group 0 = new multimodal adapters (base LR); group 1 = warm-started
+            # trunk (base LR, scaled down each step by trunk_lr_mult). Built here
+            # (before resume) so a resumed optimizer state matches the structure.
+            self.opt, self.lr_sched = get_optimizer_and_scheduler(
+                self.model, cfg, 0, params=self._mm_build_param_groups()
+            )
+        else:
+            self.opt, self.lr_sched = get_optimizer_and_scheduler(self.model, cfg, 0)
 
         self.amp_enabled = bool(getattr(cfg.train, "use_fp16", False))
         amp_dtype_req = str(getattr(cfg.train, "amp_dtype", "auto")).lower()
@@ -1027,8 +1401,11 @@ class Trainer:
             if self.entropy_offline_enabled:
                 self.callbacks.append(OfflineEntropyProfileCallback(cfg))
 
-            # SigmaDataEstimator / plotting are master-only (no collectives, pure logging)
-            if self.is_master:
+            # SigmaDataEstimator / plotting are master-only (no collectives, pure
+            # logging). They assume single-tensor sequence batches and a single
+            # scalar-sigma schedule, so they are skipped on the multimodal path
+            # (dict batches, independent modality noise; sigma_data is configured).
+            if self.is_master and not self.is_multimodal:
                 self.callbacks.append(SigmaDataEstimator(num_batches=10))
                 self.callbacks.append(
                     EntropySchedulePlotCallback(
@@ -1046,9 +1423,18 @@ class Trainer:
                 self.callbacks.append(ExternalPPLCallback(cfg)) 
 
 
-            # VLB (All ranks - critical for DDP synchronization)
+            # VLB (All ranks - critical for DDP synchronization). Skipped on the
+            # multimodal path: VLBBoundCallback rebuilds the eval loader without the
+            # MultimodalTaskCollator, so the dict rows are default-collated and
+            # compute_vlb_over_loader crashes calling .to(device) on a dict. The
+            # per-modality loss/accuracy are logged directly from the multimodal step
+            # instead, so no VLB estimate is lost that the multimodal path produces.
             vlb_cfg = getattr(cfg.train, "vlb", None)
-            if vlb_cfg is not None and bool(getattr(vlb_cfg, "enabled", False)):
+            if (
+                vlb_cfg is not None
+                and bool(getattr(vlb_cfg, "enabled", False))
+                and not self.is_multimodal
+            ):
                 self.callbacks.append(
                     VLBBoundCallback(
                         every_k_epochs=int(getattr(vlb_cfg, "every_k_epochs", 10)),
@@ -1120,6 +1506,15 @@ class Trainer:
         self.resume_mode = "scratch"  # one of: scratch | init_from | resume
         self.start_epoch = self._resume()
 
+        # Multimodal warm start (sequence-checkpoint column surgery) + curriculum
+        # trunk freeze. Warm start only applies to a fresh run; a true resume
+        # already carries the trained (and possibly unfrozen) weights and its own
+        # freeze bookkeeping is re-derived from the resumed global_step.
+        if self.is_multimodal:
+            if self.resume_mode == "scratch":
+                self._mm_warm_start()
+            self._mm_apply_initial_freeze()
+
         if self.is_master and self.tb is not None:
             self.tb.prepare_for_run(self.resume_mode)
             self.writer = self.tb.writer
@@ -1147,10 +1542,26 @@ class Trainer:
             self._print_model_summary()
 
     # ──────────────────────────────────────────────────────────────────────
-    # Basic W&B logging helper
+    # EMA and logging helpers
     # ──────────────────────────────────────────────────────────────────────
+    def _update_ema(self) -> None:
+        if self.ema_ramp_enabled:
+            self.ema.decay = _ema_decay_for_step(
+                self.ema_ramp_start,
+                self.ema_ramp_end,
+                self.ema_ramp_steps,
+                self.global_step + 1,
+            )
+        self.ema.update(self.model)
+
     def _log_wandb(self, data: dict):
         if not self.use_wandb or not self.is_master:
+            return
+        # When TensorBoard sync is on, the same metrics already flow to W&B via
+        # the mirrored TB writes (with the TB global_step as the x-axis). Logging
+        # them again here would duplicate the series and fight over the W&B step,
+        # so stand down and let the mirror be the single source of truth.
+        if getattr(self, "_wandb_sync_tb", False):
             return
         payload = dict(data)
         payload["global_step"] = int(self.global_step)
@@ -1255,7 +1666,7 @@ class Trainer:
                 print(f"⚠️  RNG state restore warning: {e}")
 
     def _load_checkpoint(self, path: Path):
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         state_dict = ckpt["model"]
         clean_state_dict = {}
         for k, v in state_dict.items():
@@ -1289,6 +1700,40 @@ class Trainer:
         start_epoch = ckpt.get("epoch", -1) + 1
         self.best_metric = ckpt.get("best_metric", self.best_metric)
         self.best_ckpts = ckpt.get("best_ckpts", self.best_ckpts)
+        self.early_stop_best = ckpt.get("early_stop_best", self.best_metric)
+        self.early_stop_bad_epochs = int(ckpt.get("early_stop_bad_epochs", 0))
+
+        # Multimodal exact-resume: restore the batch-sampler cursor and collator
+        # RNG/counter, and if the checkpoint was taken mid-epoch, re-enter that
+        # same epoch at the saved batch cursor instead of skipping to the next
+        # epoch (gate 5). Non-multimodal resume is unchanged.
+        self._mm_resume_cursor = 0
+        self._mm_resume_epoch = -1
+        if self.is_multimodal:
+            bs = getattr(self.train_loader, "batch_sampler", None)
+            coll = getattr(self.train_loader, "collate_fn", None)
+            if "mm_sampler" in ckpt and bs is not None and hasattr(bs, "load_state_dict"):
+                bs.load_state_dict(ckpt["mm_sampler"])
+            if "mm_collator" in ckpt and coll is not None and hasattr(coll, "load_state_dict"):
+                coll.load_state_dict(ckpt["mm_collator"])
+            cursor = int(ckpt.get("mm_batch_cursor", 0))
+            steps_per_epoch = int(getattr(self.cfg.train, "steps_per_epoch", 0))
+            # Only re-enter the same epoch when the batch sampler can actually seek
+            # to a cursor (SourceLengthBatchSampler). A non-seekable fallback
+            # sampler (e.g. DistributedLengthBucketBatchSampler when
+            # steps_per_epoch<=0) would restart the epoch from batch 0, so fall
+            # back to the standard next-epoch resume instead.
+            sampler_seekable = bs is not None and hasattr(bs, "start_batch")
+            if (
+                cursor > 0
+                and sampler_seekable
+                and (steps_per_epoch <= 0 or cursor < steps_per_epoch)
+            ):
+                # Rolling checkpoint mid-epoch: continue the same epoch.
+                self._mm_resume_cursor = cursor
+                self._mm_resume_epoch = int(ckpt.get("epoch", -1))
+                start_epoch = int(ckpt.get("epoch", -1))
+
         if self.is_master:
             print(f"Resumed from {path} (Epoch {start_epoch})")
         return start_epoch
@@ -1316,7 +1761,7 @@ class Trainer:
 
         This is the "fresh run from weights" mode.
         """
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if "model" not in ckpt:
             raise KeyError(f"Checkpoint at {path} missing key 'model'.")
 
@@ -1353,6 +1798,8 @@ class Trainer:
         self.global_step = 0
         self.best_metric = math.inf if self.checkpoint_mode == "min" else -math.inf
         self.best_ckpts = []
+        self.early_stop_best = self.best_metric
+        self.early_stop_bad_epochs = 0
 
         if self.is_master:
             print(f"[init_from] Initialized running weights from: {path}")
@@ -1405,6 +1852,252 @@ class Trainer:
                     if self.is_master and method_name == "on_epoch_end":
                         print(f"[callback] after  {cb.__class__.__name__}: {_gpu_mem_msg(self.device)}")
     
+    # ──────────────────────────────────────────────────────────────────────
+    # Multimodal (18-bit paired) training path: dict batches, warm start,
+    # trunk freeze/unfreeze, lower trunk LR, and sequence-only replay (gates 2/3).
+    # Every method below is inert unless cfg.data.dataset selects the paired
+    # multimodal corpus, so the sequence-only paths are byte-for-byte unchanged.
+    # ──────────────────────────────────────────────────────────────────────
+    _MM_ADAPTER_PREFIXES = (
+        "patch_proj",
+        "unpatch_proj_content",
+        "head",
+        "mm_embed",
+    )
+
+    def _mm_is_trunk_param(self, name: str) -> bool:
+        """True for warm-started shared params; False for new multimodal adapters.
+
+        Adapters (``patch_proj``, ``unpatch_proj_content``, ``head``, ``mm_embed``)
+        carry the freshly initialized structure columns / slot embeddings and
+        always train; the trunk (``blocks``, ``time_*``, ``cont_input_proj``) is the
+        warm-started shared backbone the curriculum freezes first, then unfreezes
+        at a lower learning rate.
+        """
+        n = name.replace("_orig_mod.", "")
+        if n.startswith("module."):
+            n = n[7:]
+        top = n.split(".", 1)[0]
+        return top not in self._MM_ADAPTER_PREFIXES
+
+    def _mm_build_param_groups(self):
+        raw = _unwrap_all(self.model)
+        adapter, trunk = [], []
+        for name, p in raw.named_parameters():
+            (trunk if self._mm_is_trunk_param(name) else adapter).append(p)
+        # Order matters: group 0 = adapters, group 1 = trunk (scaled each step).
+        return [
+            {"params": adapter, "mm_group": "adapter"},
+            {"params": trunk, "mm_group": "trunk"},
+        ]
+
+    def _mm_set_trunk_requires_grad(self, flag: bool) -> None:
+        raw = _unwrap_all(self.model)
+        for name, p in raw.named_parameters():
+            if self._mm_is_trunk_param(name):
+                p.requires_grad_(bool(flag))
+
+    def _mm_apply_initial_freeze(self) -> None:
+        """Freeze the trunk iff still inside the warm-start freeze window."""
+        if self.freeze_trunk_steps <= 0:
+            self._trunk_frozen = False
+            return
+        should_freeze = int(self.global_step) < int(self.freeze_trunk_steps)
+        self._mm_set_trunk_requires_grad(not should_freeze)
+        self._trunk_frozen = should_freeze
+        if should_freeze and self.is_master:
+            print(
+                f"[multimodal] trunk frozen for warm start until step "
+                f"{self.freeze_trunk_steps} (adapters train first)."
+            )
+
+    def _mm_maybe_unfreeze(self) -> None:
+        if self._trunk_frozen and int(self.global_step) >= int(
+            self.freeze_trunk_steps
+        ):
+            self._mm_set_trunk_requires_grad(True)
+            self._trunk_frozen = False
+            if self.is_master:
+                print(
+                    f"[multimodal] unfroze trunk at step {self.global_step} "
+                    f"(trunk_lr_mult={self.trunk_lr_mult})."
+                )
+
+    def _mm_warm_start(self) -> None:
+        """Column-surgery warm start from a sequence-only checkpoint (plan 6.4)."""
+        path = self.warm_start_seq_checkpoint
+        if not path:
+            return
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(
+                f"cfg.model.warm_start_seq_checkpoint not found: {p}"
+            )
+        from utils.protein_warmstart import warm_start_multimodal_from_sequence
+
+        ckpt = torch.load(p, map_location="cpu", weights_only=False)
+        seq_sd = None
+        if isinstance(ckpt, dict):
+            use_ema = bool(getattr(self.cfg.model, "warm_start_use_ema", True))
+            ema_obj = ckpt.get("ema") if use_ema else None
+            if isinstance(ema_obj, dict) and "shadow" in ema_obj:
+                seq_sd = ema_obj["shadow"]
+            if seq_sd is None:
+                seq_sd = ckpt.get("model", ckpt)
+        else:
+            seq_sd = ckpt
+        report = warm_start_multimodal_from_sequence(
+            _unwrap_all(self.model), seq_sd, verbose=self.is_master
+        )
+        if report["exact"] == 0 and report["slot_copied"] == 0:
+            raise RuntimeError(
+                f"warm start from {p} copied no parameters "
+                f"({report}); trunk width/depth likely mismatched."
+            )
+        # Re-seed the EMA shadow from the warm-started weights so evaluation does
+        # not average toward the discarded random init.
+        self.ema = EMA(self.model, decay=self.cfg.train.ema_decay)
+        self.ema.to(self.device)
+        if self.is_master:
+            print(f"[multimodal] warm start from {p}: {report}")
+
+    def _mm_next_replay_batch(self):
+        if self._replay_iter is None:
+            self._replay_iter = iter(self.replay_loader)
+        try:
+            return next(self._replay_iter)
+        except StopIteration:
+            self._replay_iter = iter(self.replay_loader)
+            return next(self._replay_iter)
+
+    def _mm_should_replay(self) -> bool:
+        """Deterministic per-step replay decision (resumable, keyed by step)."""
+        if (
+            not self.is_multimodal
+            or self.replay_fraction <= 0.0
+            or self.replay_loader is None
+        ):
+            return False
+        seed = int(getattr(self.cfg.train, "seed", 42))
+        draw = np.random.default_rng((seed, 777, int(self.global_step))).random()
+        return bool(draw < self.replay_fraction)
+
+    def _step_multimodal(self, batch, is_train: bool):
+        """One 18-bit paired micro-step with gradient accumulation.
+
+        Accumulates ``grad_accum_steps`` micro-batches into one optimizer step so
+        the effective global batch (measured in residue-patches) can be held
+        constant across node counts. The optimizer/scheduler/EMA and the trunk-LR
+        rescale fire only on the accumulation boundary; ``self._did_optim_step``
+        tells the train loop when a real optimizer step happened so it advances
+        ``global_step`` once per effective batch (not per micro-batch). With
+        ``grad_accum_steps == 1`` every micro-step is a boundary, i.e. the previous
+        single-step behavior. Under DDP the gradient all-reduce is suppressed on
+        non-boundary micro-steps via ``no_sync`` so accumulation stays cheap.
+        """
+        from trainers.multimodal_step import multimodal_training_step
+
+        if is_train:
+            # Unfreeze before the forward so the boundary step trains the trunk.
+            self._mm_maybe_unfreeze()
+
+        accum = max(1, int(getattr(self, "grad_accum_steps", 1)))
+        is_boundary = (not is_train) or ((self._accum_counter + 1) >= accum)
+        # Suppress DDP gradient sync on the non-final micro-steps of a window.
+        suppress_sync = (
+            is_train
+            and accum > 1
+            and not is_boundary
+            and self.ddp_active
+            and hasattr(self.model, "no_sync")
+        )
+        sync_ctx = self.model.no_sync() if suppress_sync else contextlib.nullcontext()
+
+        # Online entropy schedule for the paired path. draw_sigma() returns the
+        # log-normal/EDM base until the schedule is warmed up + ready, then blends
+        # toward the entropic schedule (gamma ramp), exactly like _step_continuous.
+        # Only engage on training micro-steps and only when entropy is configured,
+        # so every other multimodal config is byte-for-byte unchanged.
+        entropy_on = is_train and self.cfg.framework == "continuous_score" and (
+            self.entropy_compute or self.entropy_use_for_sampling
+        )
+        sigma_draw_fn = self.entropy_ctrl.draw_sigma if entropy_on else None
+        entropy_sink = {} if (is_train and self.entropy_compute) else None
+        diagnostics_sink = {} if not is_train else None
+
+        amp_enabled = bool(self.cfg.train.use_fp16)
+        with autocast(self.device.type, enabled=amp_enabled, dtype=self.amp_dtype):
+            loss, components = multimodal_training_step(
+                self.model,
+                batch,
+                self.proc,
+                self.cfg,
+                device=self.device,
+                is_train=is_train,
+                sigma_draw_fn=sigma_draw_fn,
+                entropy_sink=entropy_sink,
+                diagnostics_sink=diagnostics_sink,
+            )
+
+        # Feed the entropy FIFO buffer with this micro-batch's valid per-modality
+        # (sigma, denoising-MSE) pairs (both modalities, independent sigmas). Runs
+        # every micro-batch under grad accumulation, mirroring _step_continuous.
+        if entropy_sink:
+            vs = entropy_sink["valid_seq"]
+            vt = entropy_sink["valid_struct"]
+            sig = torch.cat([entropy_sink["sigma_seq"][vs], entropy_sink["sigma_struct"][vt]])
+            met = torch.cat([entropy_sink["metric_seq"][vs], entropy_sink["metric_struct"][vt]])
+            if sig.numel() > 0:
+                self._update_entropy_buffer(sig, met)
+
+        if is_train:
+            if self._accum_counter == 0:
+                self.opt.zero_grad(set_to_none=True)
+            scaled = loss / accum  # so accumulated grads average the window
+            with sync_ctx:
+                if self.use_scaler:
+                    self.scaler.scale(scaled).backward()
+                else:
+                    scaled.backward()
+
+            if is_boundary:
+                if self.use_scaler:
+                    if self.grad_clip > 0:
+                        self.scaler.unscale_(self.opt)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.grad_clip
+                        )
+                    self.scaler.step(self.opt)
+                    self.scaler.update()
+                else:
+                    if self.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.grad_clip
+                        )
+                    self.opt.step()
+
+                self.lr_sched.step()
+                # The scheduler forces one lr on every group; scale the trunk group
+                # (group 1) back down so the warm-started backbone moves slower.
+                if self._trunk_group_active:
+                    self.opt.param_groups[1]["lr"] *= self.trunk_lr_mult
+                self._update_ema()
+                self._accum_counter = 0
+                self._did_optim_step = True
+            else:
+                self._accum_counter += 1
+                self._did_optim_step = False
+        else:
+            self._did_optim_step = True
+
+        self._last_mm_components = {k: float(v) for k, v in components.items()}
+        if diagnostics_sink is not None:
+            diagnostics_sink["task_names"] = list(batch.get("task_names", []))
+            self._last_mm_val_diagnostics = diagnostics_sink
+        else:
+            self._last_mm_val_diagnostics = None
+        return loss.item()
+
     # -----------------------------------------------------------------------------
     # Trainer method: full step_continuous
     # -----------------------------------------------------------------------------
@@ -1652,7 +2345,7 @@ class Trainer:
                 self.opt.step()
 
             self.lr_sched.step()
-            self.ema.update(self.model)
+            self._update_ema()
 
         # ------------------------------------------------------------------
         # Entropy buffer update
@@ -1733,7 +2426,7 @@ class Trainer:
                 self.opt.step()
 
             self.lr_sched.step()
-            self.ema.update(self.model)
+            self._update_ema()
 
         return loss.item()
 
@@ -1743,25 +2436,61 @@ class Trainer:
         self.model.eval()
         self.ema.apply(self.model)
 
+        # Deterministic validation (opt-in via cfg.train.deterministic_validation):
+        # the validation loss is a weighted denoising loss at a *random* sigma and a
+        # random noise draw per batch, so with a small validation_max_batches it is a
+        # high-variance estimator (it can swing several-fold epoch to epoch). Fixing
+        # the sigma / Gaussian-noise stream to a constant seed makes val loss
+        # comparable across epochs, so early-stopping and best-checkpoint selection
+        # act on real generalization changes rather than sampling noise. The RNG is
+        # snapshotted and restored so the training stream is completely unaffected.
+        deterministic = bool(getattr(self.cfg.train, "deterministic_validation", False))
+        rng_snapshot = None
+        if deterministic:
+            rng_snapshot = self._rng_state()
+            vseed = int(getattr(self.cfg.train, "val_seed", 1234))
+            random.seed(vseed)
+            np.random.seed(vseed)
+            torch.manual_seed(vseed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(vseed)
+
         local_loss = torch.tensor(0.0, device=self.device)
         local_count = torch.tensor(0.0, device=self.device)
+        mm_stats = None
+        if self.is_multimodal:
+            task_weights = getattr(self.cfg.data, "task_weights", {})
+            mm_stats = _mm_validation_accumulator(self.device, dict(task_weights).keys())
 
         pbar = tqdm(self.val_loader, desc="Validating", leave=False, disable=not self.is_master)
 
         for batch in pbar:
+            if 0 < int(getattr(self.cfg.train, "validation_max_batches", 0)) <= int(local_count.item()):
+                break
             x0 = batch[0] if isinstance(batch, (list, tuple)) else batch
             loss = step_fn(x0, is_train=False)
             local_loss += loss
             local_count += 1.0
+            if mm_stats is not None and self._last_mm_val_diagnostics is not None:
+                diagnostics = self._last_mm_val_diagnostics
+                _mm_accumulate_validation(
+                    mm_stats, diagnostics, diagnostics.get("task_names", [])
+                )
 
         if self.ddp_active:
             dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
             dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+            if mm_stats is not None:
+                for values in mm_stats.values():
+                    dist.all_reduce(values, op=dist.ReduceOp.SUM)
 
         avg_loss = (local_loss / local_count).item()
+        val_metrics = _mm_finalize_validation(mm_stats) if mm_stats is not None else {}
 
         self.ema.restore(self.model)
-        return avg_loss
+        if rng_snapshot is not None:
+            self._set_rng_state(rng_snapshot)
+        return avg_loss, val_metrics
 
     # ──────────────────────────────────────────────────────────────────────
     # Checkpoint helpers
@@ -1784,7 +2513,7 @@ class Trainer:
         # If you ever store backups (you currently don't persist them), ignore them:
         # ema_sd_cpu has only decay + shadow, which is all you need.
 
-        return {
+        state = {
             "epoch": epoch,
             "global_step": self.global_step,
             "model": raw_model.state_dict(),
@@ -1796,7 +2525,22 @@ class Trainer:
             "rng_state": self._rng_state(),
             "best_metric": self.best_metric,
             "best_ckpts": self.best_ckpts,
+            "early_stop_best": self.early_stop_best,
+            "early_stop_bad_epochs": self.early_stop_bad_epochs,
         }
+
+        # Multimodal resume payload: batch-sampler cursor + collator RNG/counter
+        # so a preempted paired run resumes at the exact next batch (gate 5).
+        if self.is_multimodal:
+            bs = getattr(self.train_loader, "batch_sampler", None)
+            coll = getattr(self.train_loader, "collate_fn", None)
+            if bs is not None and hasattr(bs, "state_dict"):
+                state["mm_sampler"] = bs.state_dict()
+            if coll is not None and hasattr(coll, "state_dict"):
+                state["mm_collator"] = coll.state_dict()
+            state["mm_batch_cursor"] = int(getattr(self, "_epoch_batches_done", 0))
+
+        return state
 
     def _save_ckpt(self, epoch: int, val_metric: float):
         # Only master saves
@@ -1835,8 +2579,8 @@ class Trainer:
             os.replace(tmp_path, final_path)
 
         if self.save_top_k > 0 and new_best and new_best_path is not None:
-            torch.save(state, new_best_path)
-            torch.save(state, self._checkpoint_path("best"))
+            _atomic_torch_save(state, new_best_path)
+            _atomic_torch_save(state, self._checkpoint_path("best"))
 
     def _maybe_save_resume_ckpt(self, epoch: int) -> None:
         """
@@ -1890,7 +2634,7 @@ class Trainer:
         # Save
         name = f"step={int(self.global_step):09d}"
         path = self._checkpoint_path(name)
-        torch.save(state, path)
+        _atomic_torch_save(state, path)
 
         # Track interval ckpts for optional pruning (only interval ckpts)
         self._interval_ckpt_paths.append(path.name)
@@ -1910,10 +2654,45 @@ class Trainer:
 
 
     # ──────────────────────────────────────────────────────────────────────
+    def _update_early_stopping(self, val_metric: float) -> bool:
+        cfg = getattr(self.cfg.train, "early_stopping", None)
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return False
+        if self.global_step < int(getattr(cfg, "warmup_steps", 0)):
+            return False
+
+        min_delta = float(getattr(cfg, "min_delta", 0.0))
+        if self.checkpoint_mode == "min":
+            improved = val_metric < (self.early_stop_best - min_delta)
+        else:
+            improved = val_metric > (self.early_stop_best + min_delta)
+
+        if improved:
+            self.early_stop_best = float(val_metric)
+            self.early_stop_bad_epochs = 0
+        else:
+            self.early_stop_bad_epochs += 1
+
+        patience = max(1, int(getattr(cfg, "patience_epochs", 1)))
+        should_stop = self.early_stop_bad_epochs >= patience
+        if self.is_master:
+            print(
+                f"[early-stop] best={self.early_stop_best:.6f} "
+                f"bad_epochs={self.early_stop_bad_epochs}/{patience} "
+                f"min_delta={min_delta:g}"
+            )
+        return should_stop
+
+
     # Training Loop
     # ──────────────────────────────────────────────────────────────────────
     def train(self):
-        step_fn = self._step_continuous if self.cfg.framework == "continuous_score" else self._step_discrete
+        if self.is_multimodal:
+            step_fn = self._step_multimodal
+        elif self.cfg.framework == "continuous_score":
+            step_fn = self._step_continuous
+        else:
+            step_fn = self._step_discrete
 
         # IMPORTANT: callbacks may include run_on_all_ranks=True (e.g. offline entropy)
         self._run_callbacks("on_train_begin")
@@ -1929,6 +2708,38 @@ class Trainer:
                 # Critical for DDP: shuffle data differently each epoch
                 if self.ddp_active and hasattr(self.train_loader.sampler, "set_epoch"):
                     self.train_loader.sampler.set_epoch(epoch)
+                if hasattr(self.train_loader.batch_sampler, "set_epoch"):
+                    self.train_loader.batch_sampler.set_epoch(epoch)
+
+                # Multimodal: advance the collator epoch too, and honour a
+                # mid-epoch resume cursor for exact next-batch continuation.
+                resume_cursor = 0
+                if self.is_multimodal:
+                    if getattr(self, "_mm_resume_cursor", 0) and epoch == getattr(
+                        self, "_mm_resume_epoch", -1
+                    ):
+                        resume_cursor = int(self._mm_resume_cursor)
+                        self._mm_resume_cursor = 0  # consume once
+                    coll = getattr(self.train_loader, "collate_fn", None)
+                    if coll is not None and hasattr(coll, "set_epoch"):
+                        coll.set_epoch(epoch)
+                    bs = getattr(self.train_loader, "batch_sampler", None)
+                    if resume_cursor:
+                        if bs is not None and hasattr(bs, "start_batch"):
+                            bs.start_batch = resume_cursor
+                        if coll is not None and hasattr(coll, "_counter"):
+                            coll._counter = resume_cursor
+                    # Advance the replay loader's sampler/collator epoch too, so
+                    # replay does not draw the same frozen batch cycle every epoch.
+                    if self.replay_loader is not None:
+                        rbs = getattr(self.replay_loader, "batch_sampler", None)
+                        if rbs is not None and hasattr(rbs, "set_epoch"):
+                            rbs.set_epoch(epoch)
+                        rcoll = getattr(self.replay_loader, "collate_fn", None)
+                        if rcoll is not None and hasattr(rcoll, "set_epoch"):
+                            rcoll.set_epoch(epoch)
+                        self._replay_iter = None  # rebuild iterator for the new epoch
+                self._epoch_batches_done = resume_cursor
 
                 self.model.train()
                 train_loss = 0.0
@@ -1951,12 +2762,30 @@ class Trainer:
                     if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
                         torch.compiler.cudagraph_mark_step_begin()
 
+                    # Token-budgeted sequence-only replay: with probability
+                    # replay_fraction pull a sequence-only batch (same dict format)
+                    # so paired training does not forget the warm-started sequence
+                    # model (plan 6.6 step 3). Decision is deterministic per step
+                    # for exact resume.
+                    did_replay = False
+                    if self._mm_should_replay():
+                        batch = self._mm_next_replay_batch()
+                        did_replay = True
+
                     x0 = batch[0] if isinstance(batch, (list, tuple)) else batch
                     loss = step_fn(x0, is_train=True)
 
-                    self.global_step += 1
+                    # global_step counts OPTIMIZER steps (effective batches), so it
+                    # only advances on an accumulation boundary. Non-multimodal
+                    # step fns leave _did_optim_step True, so they advance every
+                    # batch as before. The sampler cursor (_epoch_batches_done)
+                    # advances every micro-batch for exact-next-batch resume.
+                    if self._did_optim_step:
+                        self.global_step += 1
                     train_loss += loss
                     num_train_batches += 1
+                    # Per-epoch batch cursor (resume-aware; may start > 0).
+                    self._epoch_batches_done += 1
 
                     # ----------------------------------------------------------
                     # PATCH: refresh online entropy schedule during training
@@ -1965,6 +2794,11 @@ class Trainer:
                         self.cfg.framework == "continuous_score"
                         and self.entropy_compute
                         and (not self.entropy_offline_enabled)
+                        # The multimodal step now fills the entropy buffer too, so
+                        # both paths refresh the schedule. _did_optim_step keeps this
+                        # to one recompute per optimizer step under grad accumulation
+                        # (and stays True on the continuous path, unchanged there).
+                        and self._did_optim_step
                     ):
                         update_every = int(getattr(self.cfg.train, "entropy_update_every_steps", 2000))
                         if update_every > 0 and (self.global_step % update_every == 0):
@@ -1978,10 +2812,23 @@ class Trainer:
                         pbar.set_postfix(loss=f"{loss:.4f}")
 
                         # TB logging throttled (HPC-friendly)
+                        # Running (EMA) train loss. The per-step diffusion loss is
+                        # very noisy (a fresh random sigma each step swings the
+                        # EDM-weighted value by an order of magnitude), so this
+                        # smoothed curve is what to read for the training trend;
+                        # loss/iter_train keeps the raw per-step value.
+                        self._loss_ema = (
+                            loss
+                            if self._loss_ema is None
+                            else 0.98 * self._loss_ema + 0.02 * loss
+                        )
+
                         if self.tb_scalar_every_steps > 0 and (self.global_step % self.tb_scalar_every_steps == 0):
                             self.writer.add_scalar("loss/iter_train", loss, self.global_step)
+                            self.writer.add_scalar("loss/iter_train_smooth", self._loss_ema, self.global_step)
                             lr = self.opt.param_groups[0]["lr"]
                             self.writer.add_scalar("learning_rate", lr, self.global_step)
+                            self.writer.add_scalar("ema/decay", self.ema.decay, self.global_step)
 
                             self._log_wandb(
                                 {
@@ -1989,6 +2836,21 @@ class Trainer:
                                     "learning_rate": lr,
                                 }
                             )
+
+                            # Per-modality diagnostics for the paired path.
+                            if self.is_multimodal and self._last_mm_components:
+                                mm = {
+                                    f"multimodal/{k}": v
+                                    for k, v in self._last_mm_components.items()
+                                }
+                                mm["multimodal/replay_step"] = float(did_replay)
+                                if self._trunk_group_active:
+                                    mm["multimodal/trunk_lr"] = float(
+                                        self.opt.param_groups[1]["lr"]
+                                    )
+                                for k, v in mm.items():
+                                    self.writer.add_scalar(k, v, self.global_step)
+                                self._log_wandb(mm)
 
                         # Optional step-based sync (usually keep 0 on HPC)
                         if (
@@ -2001,6 +2863,11 @@ class Trainer:
                     if target_total_steps > 0 and self.global_step >= target_total_steps:
                         stop_training = True
                         break
+                    steps_per_epoch = int(getattr(self.cfg.train, "steps_per_epoch", 0))
+                    # Use the resume-aware cursor so a mid-epoch resume finishes
+                    # the epoch at the original boundary instead of overshooting.
+                    if steps_per_epoch > 0 and self._epoch_batches_done >= steps_per_epoch:
+                        break
 
                 # If we did not process any batch in this epoch, stop cleanly
                 if num_train_batches == 0:
@@ -2011,20 +2878,51 @@ class Trainer:
                 # Average losses using the actual number of processed batches
                 avg_train_loss = train_loss / max(1, num_train_batches)
 
-                # Validated loss (synchronized)
-                avg_val_loss = self._validate_epoch(step_fn)
+                # Validation returns the legacy EDM loss plus optional multimodal
+                # diagnostics. Configured selection metrics drive best.pt without
+                # changing the historical loss/epoch_val series.
+                avg_val_loss, val_metrics = self._validate_epoch(step_fn)
+                checkpoint_cfg = getattr(self.cfg.train, "checkpointing", None)
+                checkpoint_metric = str(
+                    getattr(checkpoint_cfg, "metric", "edm_loss")
+                    if checkpoint_cfg is not None else "edm_loss"
+                ).lower()
+                if checkpoint_metric == "balanced_mse":
+                    if "validation/balanced_mse" not in val_metrics:
+                        raise RuntimeError(
+                            "checkpointing.metric=balanced_mse requires multimodal validation diagnostics"
+                        )
+                    selection_metric = val_metrics["validation/balanced_mse"]
+                elif checkpoint_metric in {"edm", "edm_loss", "loss/epoch_val"}:
+                    selection_metric = avg_val_loss
+                else:
+                    raise ValueError(f"Unknown checkpointing.metric={checkpoint_metric!r}")
+                early_stop_requested = self._update_early_stopping(selection_metric)
 
                 if self.is_master:
                     self.writer.add_scalar("loss/epoch_train", avg_train_loss, self.global_step)
                     self.writer.add_scalar("loss/epoch_val", avg_val_loss, self.global_step)
                     self.writer.add_scalar("training/epoch_index", epoch, self.global_step)
+                    self.writer.add_scalar("validation/selection_score", selection_metric, self.global_step)
+                    if self.device.type == "cuda":
+                        peak_gib = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
+                        self.writer.add_scalar("system/peak_cuda_memory_gib", peak_gib, self.global_step)
+                        print(f"Peak CUDA memory: {peak_gib:.2f} GiB")
+                    for key, value in sorted(val_metrics.items()):
+                        self.writer.add_scalar(key, value, self.global_step)
 
-                    print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+                    print(
+                        f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, "
+                        f"Val Loss = {avg_val_loss:.4f}, "
+                        f"Selection ({checkpoint_metric}) = {selection_metric:.6f}"
+                    )
 
                     self._log_wandb(
                         {
                             "loss/epoch_train": avg_train_loss,
                             "loss/epoch_val": avg_val_loss,
+                            "validation/selection_score": selection_metric,
+                            **val_metrics,
                             "epoch": epoch,
                         }
                     )
@@ -2033,7 +2931,7 @@ class Trainer:
                 self._run_callbacks("on_epoch_end", epoch)
 
                 if self.is_master:
-                    self._save_ckpt(epoch, avg_val_loss)
+                    self._save_ckpt(epoch, selection_metric)
 
                 # Flush TB buffers and sync staged logs -> run_dir (master only)
                 if self.is_master and self.tb is not None:
@@ -2049,9 +2947,18 @@ class Trainer:
                 if self.ddp_active:
                     dist.barrier()
 
-                if stop_training:
+                if stop_training or early_stop_requested:
                     if self.is_master:
-                        print(f"Reached target total_steps={target_total_steps}. Stopping training.")
+                        if early_stop_requested:
+                            print(
+                                "Early stopping: validation did not improve beyond "
+                                "min_delta for the configured patience."
+                            )
+                        else:
+                            print(
+                                f"Reached target total_steps={target_total_steps}. "
+                                "Stopping training."
+                            )
                     break
 
         except KeyboardInterrupt:

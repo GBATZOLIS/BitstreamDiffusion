@@ -9,6 +9,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from data.proteins import DistributedLengthBucketBatchSampler
+
 from evaluation.vlb import compute_vlb_over_loader
 from utils.model_utils import unwrap_model
 
@@ -149,16 +151,43 @@ class VLBBoundCallback:
         if cached is not None:
             return cached
 
-        loader_kwargs = dict(
-            batch_size=batch_size,
-            shuffle=False,
-            drop_last=True,
+        worker_kwargs = dict(
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
         )
         if num_workers > 0:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
+            worker_kwargs["prefetch_factor"] = prefetch_factor
+
+        # DiMA examples are stored without padding and therefore have variable
+        # tensor lengths. Preserve same-length batching in this auxiliary
+        # loader instead of default-collating mixed-length examples.
+        if isinstance(
+            getattr(base_loader, "batch_sampler", None),
+            DistributedLengthBucketBatchSampler,
+        ):
+            batch_sampler = DistributedLengthBucketBatchSampler(
+                dataset.lengths,
+                batch_size=batch_size,
+                shuffle=False,
+                seed=int(getattr(trainer.cfg.train, "seed", 42)),
+                rank=rank,
+                world_size=world_size,
+            )
+            loader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                **worker_kwargs,
+            )
+            self._cached_loaders[cache_key] = loader
+            return loader
+
+        loader_kwargs = dict(
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=True,
+            **worker_kwargs,
+        )
 
         if _ddp_is_on():
             sampler = DistributedSampler(

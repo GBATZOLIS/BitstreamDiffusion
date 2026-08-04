@@ -572,6 +572,81 @@ def binary_score_interpolation_loss(
     return mean_loss, entropy_metric
 
 
+def multimodal_bit_loss(
+    logits: torch.Tensor,          # [B, S, 1] or [B, S]
+    x0: torch.Tensor,              # [B, S] target bits
+    sigma_map: torch.Tensor,       # [B, S] per-bit noise level (0 at non-targets)
+    cfg,
+    seq_target_mask: torch.Tensor,     # [B, S] bool/float, sequence target bits
+    struct_target_mask: torch.Tensor,  # [B, S] bool/float, structure target bits
+    lambda_seq: float = 1.0,
+    lambda_struct: float = 1.0,
+):
+    """Equal-modality denoising loss for the 18-bit patch (plan section 6.3).
+
+    Reduces sequence and structure losses separately over their valid target
+    bits so a naive mean does not hand structure 13/18 of the gradient. Returns
+    ``(total_loss, components)`` where ``components`` logs per-modality loss and
+    bit accuracy. The per-bit EDM weight uses each bit's own noise level; non
+    target bits carry sigma 0 and are given zero weight to avoid inf*0.
+    """
+    if logits.dim() == 3:
+        if logits.size(-1) != 1:
+            raise ValueError(f"Expected logits last dim = 1 if 3D, got {tuple(logits.shape)}")
+        logits = logits.squeeze(-1)
+    elif logits.dim() != 2:
+        raise ValueError(f"Expected logits dim 2 or 3, got {tuple(logits.shape)}")
+
+    target = x0.to(torch.float32)
+    logits_f32 = logits.to(torch.float32)
+    loss_type = str(getattr(cfg.train, "loss_type", "binary_ce")).lower()
+    if loss_type == "binary_sm":
+        per_pos = (torch.sigmoid(logits_f32) - target) ** 2
+    elif loss_type == "binary_ce":
+        per_pos = F.binary_cross_entropy_with_logits(logits_f32, target, reduction="none")
+    else:
+        raise ValueError(f"Unknown loss_type '{loss_type}'")
+
+    sigma2 = sigma_map.to(torch.float32) ** 2
+    weighting = str(getattr(cfg.train, "loss_weighting", "edm")).lower()
+    sd2 = float(cfg.diffusion.continuous.sigma_data) ** 2
+    if weighting in {"none", "unit", "1"}:
+        weight = torch.ones_like(sigma2)
+    else:
+        positive = sigma2 > 0
+        safe = torch.where(positive, sigma2, torch.ones_like(sigma2))
+        weight = (safe + sd2) / (safe * sd2)
+        weight = torch.where(positive, weight, torch.zeros_like(weight))
+
+    seq_m = seq_target_mask.to(torch.float32)
+    struct_m = struct_target_mask.to(torch.float32)
+
+    def _reduce(m):
+        num = (weight * per_pos * m).sum()
+        den = m.sum().clamp_min(1.0)
+        return num / den
+
+    loss_seq = _reduce(seq_m)
+    loss_struct = _reduce(struct_m)
+    total = lambda_seq * loss_seq + lambda_struct * loss_struct
+
+    with torch.no_grad():
+        pred = (logits_f32 > 0).to(torch.float32)
+        correct = (pred == target).to(torch.float32)
+        seq_acc = (correct * seq_m).sum() / seq_m.sum().clamp_min(1.0)
+        struct_acc = (correct * struct_m).sum() / struct_m.sum().clamp_min(1.0)
+
+    components = {
+        "loss_seq": loss_seq.detach(),
+        "loss_struct": loss_struct.detach(),
+        "seq_bit_acc": seq_acc.detach(),
+        "struct_bit_acc": struct_acc.detach(),
+        "seq_target_bits": seq_m.sum().detach(),
+        "struct_target_bits": struct_m.sum().detach(),
+    }
+    return total, components
+
+
 def token_score_interpolation_loss(
     logits: torch.Tensor,
     x0: torch.Tensor,

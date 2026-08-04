@@ -1,0 +1,60 @@
+{
+  "name": "bitstream-diffusion",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "args": { "NGC_TAG": "25.03-py3" }
+  },
+
+  // --gpus all exposes the workstation GPUs; --ipc=host + a large /dev/shm are
+  // required by torch DataLoader workers and NCCL for multi-GPU runs.
+  "runArgs": [
+    "--gpus", "all",
+    "--ipc=host",
+    "--shm-size=32g",
+    "--ulimit", "memlock=-1",
+    "--ulimit", "stack=67108864"
+  ],
+
+  // Code lives in the image and is overlaid by the bind mount so edits are live.
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // Data and outputs stay on the host filesystem rather than in the image.
+  // On EOS the same paths are bound from the cluster filesystem by enroot; see
+  // scripts/cluster/enroot_build.sh.
+  "mounts": [
+    "source=${localWorkspaceFolder}/datasets,target=/workspace/datasets,type=bind,consistency=cached",
+    "source=${localWorkspaceFolder}/runs,target=/workspace/runs,type=bind,consistency=cached",
+    "source=${localWorkspaceFolder}/hf_cache,target=/workspace/hf_cache,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.ssh,target=/root/.ssh,type=bind,readonly"
+  ],
+
+  "containerEnv": {
+    "PYTHONPATH": "/workspace",
+    "HF_HOME": "/workspace/hf_cache",
+    "TOKENIZERS_PARALLELISM": "false"
+  },
+
+  // WANDB_API_KEY is read from the host env rather than baked into the image.
+  "remoteEnv": {
+    "WANDB_API_KEY": "${localEnv:WANDB_API_KEY}"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "openai.chatgpt",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python"
+      }
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "root"
+}

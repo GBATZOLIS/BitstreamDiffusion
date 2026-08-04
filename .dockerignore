@@ -1,0 +1,22 @@
+# Keep the build context lean: the image carries code only. Data and outputs are
+# bind-mounted (devcontainer) or bound from the cluster filesystem (enroot).
+.git
+.venv
+.venvs
+external
+datasets
+runs
+logs
+wandb
+hf_cache
+.trentinium
+__pycache__
+**/__pycache__
+*.pyc
+.ruff_cache
+generated_samples
+*.tar
+*.tar.gz
+*.sqsh
+m0_m1_work.html.orig
+m0_v3_analsis.log

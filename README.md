@@ -99,8 +99,8 @@ conda activate bitstream
 # (replace cu121 with your CUDA version; see https://pytorch.org/get-started)
 python -m pip install torch==2.4.* --index-url https://download.pytorch.org/whl/cu121
 
-# Project dependencies
-python -m pip install -r requirements.txt
+# Project dependencies (uv-managed; the whole system is declared in pyproject.toml)
+uv sync --extra train        # or: python -m pip install '.[train]'
 
 # Optional: FlashAttention 2 for ~30% faster training/sampling.
 # Skip this if your hardware / toolchain makes the build painful — the

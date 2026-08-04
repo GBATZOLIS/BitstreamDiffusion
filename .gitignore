@@ -26,7 +26,7 @@ MANIFEST
 
 # Virtual environments
 .env
-.venv
+.venv/
 env/
 venv/
 ENV/
@@ -40,10 +40,17 @@ venv.bak/
 *.swp
 *.swo
 
+# Private local workspace for Bruno-only notes, configs, secrets, and API keys.
+.trentinium/
+
 # PyTorch / Triton / Inductor caches
 torch_compile_debug/
 .torch_compile_cache/
 .triton_cache/
+
+# External baseline checkouts and isolated inference environments
+external/
+.venvs/
 
 # Project-specific large/transient data
 # datasets/  — symlinks to dataset caches; rebuild via scripts/lm1b/ and scripts/owt/
@@ -71,3 +78,14 @@ generated_output.png
 # Crash dumps
 core
 core.*
+
+# Cluster transfer staging: tarballs built by scripts/cluster/tar_data.sh and
+# enroot squashfs images. Both are large, regenerable, and machine-specific.
+_transfer/
+*.sqsh
+*.tar
+*.tar.gz
+
+# Local scratch artefacts that are not part of the deliverable.
+m0_m1_work.html.orig
+m0_v3_analsis.log

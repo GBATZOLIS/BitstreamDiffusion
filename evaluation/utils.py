@@ -851,19 +851,123 @@ def _bits_from_probs(
     prefix_bits: Optional[torch.Tensor],
     cL_bits: int,
     decode_strategy: str = "threshold",
+    codebook_size: Optional[int] = None,
+    bits_per_code: Optional[int] = None,
+    valid_body_codes: Optional[List[int]] = None,
+    bos_code: Optional[int] = None,
+    eos_code: Optional[int] = None,
+    pad_code: Optional[int] = None,
+    min_body_codes: int = 1,
 ) -> torch.Tensor:
-    """
-    EXACT match to GenerationCallback logic:
-      - default is threshold at 0.5
-      - prefix is clamped from prefix_bits, not from the generated sample
-    """
+    """Decode Bernoulli bit probabilities, optionally under a token grammar."""
     decode_strategy = str(decode_strategy).lower()
-    if decode_strategy == "threshold":
+    if decode_strategy in {"argmax_tokens", "token_argmax"}:
+        if probs.dim() != 3:
+            raise ValueError(
+                f"argmax_tokens expects probabilities [B,S,V], got {tuple(probs.shape)}"
+            )
+        bits = probs.argmax(dim=-1).to(torch.long)
+    elif decode_strategy == "threshold":
         bits = (probs > 0.5).to(torch.long)
     elif decode_strategy == "bernoulli":
         bits = torch.bernoulli(probs.clamp(0, 1)).to(torch.long)
+    elif decode_strategy in {
+        "codebook_map",
+        "valid_codebook",
+        "protein_codebook",
+        "protein_grammar_map",
+        "grammar_map",
+    }:
+        if codebook_size is None or bits_per_code is None:
+            raise ValueError(
+                "constrained decoding requires codebook_size and bits_per_code"
+            )
+        codebook_size = int(codebook_size)
+        bits_per_code = int(bits_per_code)
+        if codebook_size <= 0 or codebook_size > (1 << bits_per_code):
+            raise ValueError(
+                f"Invalid codebook_size={codebook_size} for bits_per_code={bits_per_code}"
+            )
+        if probs.dim() != 2 or probs.size(1) % bits_per_code != 0:
+            raise ValueError(
+                "constrained decoding expects probs [B,S] with S divisible by "
+                f"bits_per_code; got {tuple(probs.shape)}"
+            )
+
+        grouped = probs.float().clamp(1e-6, 1.0 - 1e-6).view(
+            probs.size(0), -1, bits_per_code
+        )
+        ids = torch.arange(codebook_size, device=probs.device, dtype=torch.long)
+        shifts = torch.arange(
+            bits_per_code - 1, -1, -1, device=probs.device, dtype=torch.long
+        )
+        code_bits = ((ids[:, None] >> shifts[None, :]) & 1).float()
+        cb = code_bits.view(1, 1, codebook_size, bits_per_code)
+        token_scores = (
+            grouped.log().unsqueeze(-2) * cb
+            + torch.log1p(-grouped).unsqueeze(-2) * (1.0 - cb)
+        ).sum(dim=-1)
+
+        if decode_strategy in {"protein_grammar_map", "grammar_map"}:
+            if cL_bits > 0 or prefix_bits is not None:
+                raise ValueError("protein grammar MAP currently supports unconditional generation only")
+            if not valid_body_codes or bos_code is None or eos_code is None or pad_code is None:
+                raise ValueError(
+                    "protein grammar MAP requires valid_body_codes, bos_code, eos_code, and pad_code"
+                )
+            body_codes = torch.as_tensor(
+                valid_body_codes, device=probs.device, dtype=torch.long
+            )
+            if bool(torch.any(body_codes < 0)) or bool(torch.any(body_codes >= codebook_size)):
+                raise ValueError("valid_body_codes contains an ID outside the codebook")
+            for name, code in (("bos_code", bos_code), ("eos_code", eos_code), ("pad_code", pad_code)):
+                if not 0 <= int(code) < codebook_size:
+                    raise ValueError(f"{name}={code} is outside the codebook")
+
+            batch_size, num_codes, _ = grouped.shape
+            min_len = int(min_body_codes)
+            max_len = num_codes - 2
+            if min_len < 1 or min_len > max_len:
+                raise ValueError(
+                    f"No legal grammar length: min_body_codes={min_len}, storage={num_codes}"
+                )
+
+            body_scores, body_choice = token_scores.index_select(-1, body_codes).max(dim=-1)
+            body_ids = body_codes[body_choice]
+            body_prefix = body_scores[:, 1:].cumsum(dim=1)
+            pad_scores = token_scores[:, :, int(pad_code)]
+            pad_suffix = torch.flip(
+                torch.flip(pad_scores, dims=[1]).cumsum(dim=1), dims=[1]
+            )
+            pad_suffix = torch.cat(
+                [pad_suffix, torch.zeros((batch_size, 1), device=probs.device)], dim=1
+            )
+            lengths = torch.arange(min_len, max_len + 1, device=probs.device)
+            candidate_scores = (
+                token_scores[:, 0, int(bos_code)].unsqueeze(1)
+                + body_prefix.index_select(1, lengths - 1)
+                + token_scores[:, :, int(eos_code)].index_select(1, lengths + 1)
+                + pad_suffix.index_select(1, lengths + 2)
+            )
+            best_lengths = lengths[candidate_scores.argmax(dim=1)]
+
+            best_ids = torch.full(
+                (batch_size, num_codes), int(pad_code), device=probs.device, dtype=torch.long
+            )
+            best_ids[:, 0] = int(bos_code)
+            positions = torch.arange(num_codes, device=probs.device).unsqueeze(0)
+            body_mask = (positions >= 1) & (positions <= best_lengths.unsqueeze(1))
+            best_ids = torch.where(body_mask, body_ids, best_ids)
+            best_ids.scatter_(1, (best_lengths + 1).unsqueeze(1), int(eos_code))
+        else:
+            best_ids = token_scores.argmax(dim=-1)
+
+        bits = code_bits[best_ids].to(torch.long).view(probs.size(0), -1)
     else:
-        raise ValueError(f"Unknown decode_strategy='{decode_strategy}' (use 'threshold' or 'bernoulli')")
+        raise ValueError(
+            f"Unknown decode_strategy={decode_strategy!r}; use threshold, bernoulli, "
+            "codebook_map, or protein_grammar_map"
+        )
 
     if prefix_bits is not None and cL_bits > 0:
         bits[:, :cL_bits] = (prefix_bits[:, :cL_bits] > 0.5).to(torch.long)
@@ -1011,6 +1115,13 @@ def sample_text_sequences_for_external(
     data_loader: Optional[Any] = None,
     return_dict: bool = False,
     decode_strategy: str = "threshold",
+    codebook_size: Optional[int] = None,
+    bits_per_code: Optional[int] = None,
+    valid_body_codes: Optional[List[int]] = None,
+    bos_code: Optional[int] = None,
+    eos_code: Optional[int] = None,
+    pad_code: Optional[int] = None,
+    min_body_codes: int = 1,
     guidance_scales: Optional[List[float]] = None,
     guidance_scale: Optional[float] = None,
     warmup: bool = True,
@@ -1194,6 +1305,13 @@ def sample_text_sequences_for_external(
             prefix_bits=prefix_local,
             cL_bits=cL,
             decode_strategy=decode_strategy,
+            codebook_size=codebook_size,
+            bits_per_code=bits_per_code,
+            valid_body_codes=valid_body_codes,
+            bos_code=bos_code,
+            eos_code=eos_code,
+            pad_code=pad_code,
+            min_body_codes=min_body_codes,
         )
         return bits
 

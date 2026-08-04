@@ -28,6 +28,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from data import get_dataloaders
+from data.proteins import get_dima_loader
+from data.uniref50 import get_evodiff_uniref50_loader
 from utils.ema import EMA
 from models.autoregressive import AutoregressiveGPT, ARGPTConfig
 
@@ -238,8 +240,45 @@ def main():
     # loaders
     train_loader, val_loader, _ = get_dataloaders(cfg)
     drop_last_train = bool(getattr(cfg.data, "drop_last_train", True))
+    dataset_name = _norm_ds(cfg.data.dataset)
+    is_dima_length_bucketed = dataset_name in {
+        "swissprotdima",
+        "swissprot_dima",
+        "dima_swissprot",
+    }
+    is_evodiff_length_bucketed = dataset_name in {
+        "evodiffuniref50",
+        "evodiff_uniref50",
+        "uniref50_evodiff",
+    }
 
-    if is_distributed:
+    if is_distributed and (is_dima_length_bucketed or is_evodiff_length_bucketed):
+        global_bsz = int(_require(cfg, "train.batch_size"))
+        if global_bsz % world_size != 0:
+            raise ValueError(
+                f"Global batch_size {global_bsz} must be divisible by world_size {world_size}."
+            )
+        bsz_per_gpu = global_bsz // world_size
+        protocol_loader = (
+            get_evodiff_uniref50_loader
+            if is_evodiff_length_bucketed
+            else get_dima_loader
+        )
+        train_loader = protocol_loader(
+            cfg,
+            split="train",
+            batch_size=bsz_per_gpu,
+            shuffle=True,
+            seed=int(cfg.train.seed),
+        )
+        val_loader = protocol_loader(
+            cfg,
+            split="val",
+            batch_size=bsz_per_gpu,
+            shuffle=False,
+            seed=int(cfg.train.seed),
+        )
+    elif is_distributed:
         global_bsz = int(_require(cfg, "train.batch_size"))
         if global_bsz % world_size != 0:
             raise ValueError(f"Global batch_size {global_bsz} must be divisible by world_size {world_size}.")
@@ -386,7 +425,7 @@ def main():
     start_epoch = 0
     last_path = checkpoint_path("last")
     if last_path.exists():
-        ckpt = torch.load(last_path, map_location="cpu")
+        ckpt = torch.load(last_path, map_location="cpu", weights_only=False)
         sd = unwrap_state_dict(ckpt["model"])
         raw_model.load_state_dict(sd, strict=True)
         opt.load_state_dict(ckpt["opt"])
@@ -426,6 +465,8 @@ def main():
     for epoch in range(start_epoch, epochs):
         if is_distributed and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
+        if hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(epoch)
 
         model.train()
         is_master_epoch = (not is_distributed) or (rank == 0)

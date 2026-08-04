@@ -381,6 +381,7 @@ class AutoregressiveGPT(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         use_kv_cache: bool = True,
+        vocab_limit: Optional[int] = None,
     ) -> torch.Tensor:
         """
         KV-cache-enabled autoregressive generation.
@@ -438,9 +439,14 @@ class AutoregressiveGPT(nn.Module):
                     logits_step,
                 )
 
+            if vocab_limit is not None:
+                logits_step[:, int(vocab_limit):] = -torch.inf
             probs = F.softmax(logits_step, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)  # [B,1]
             idx = torch.cat([idx, next_id], dim=1)
+
+            if _ == max_new_tokens - 1:
+                break
 
             # decode step: run one-token forward using cache
             step_logits, cache = self.forward_with_kv_cache(

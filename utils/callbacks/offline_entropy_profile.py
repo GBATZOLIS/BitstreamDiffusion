@@ -135,7 +135,7 @@ class OfflineEntropyProfileCallback(Callback):
         from utils.ema import EMA
 
         device = trainer.device
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
         probe = create_model(trainer.cfg).to(device)
         probe.load_state_dict(self._clean_state_dict(ckpt["model"]), strict=False)

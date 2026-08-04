@@ -7,6 +7,8 @@ from ml_collections import config_dict
 
 from .openwebtext import OpenWebTextDataset
 from .lm1b import LM1BDataset
+from .proteins import ProteinFastaDataset, get_dima_loader
+from .uniref50 import EvoDiffUniRef50Dataset, get_evodiff_uniref50_loader
 
 Split = Literal["train", "val", "test"]
 
@@ -65,8 +67,37 @@ def get_loader(
         ds = LM1BDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- Frozen DiMA Swiss-Prot protocol ----------------
+    if name in {"SwissProtDiMA", "swissprot_dima", "dima_swissprot"}:
+        return get_dima_loader(
+            config,
+            split=split,
+            batch_size=batch,
+            shuffle=shuffle,
+            seed=seed,
+        )
+
+    # ---------------- Frozen EvoDiff/DPLM UniRef50 protocol ----------------
+    if name in {"EvoDiffUniRef50", "evodiff_uniref50", "uniref50_evodiff"}:
+        return get_evodiff_uniref50_loader(
+            config, split=split, batch_size=batch, shuffle=shuffle, seed=seed
+        )
+
+    # ---------------- Multimodal paired 18-bit protocol ----------------
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+        return get_multimodal_loader(
+            config, split=split, batch_size=batch, shuffle=shuffle, seed=seed
+        )
+
+    # ---------------- Swiss-Prot proteins ----------------
+
+    if name in {"Proteins", "proteins", "SwissProt", "swissprot"}:
+        ds = ProteinFastaDataset(config, split=split)
+        return _make_direct_loader(ds)
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'SwissProt'."
     )
 
 
@@ -89,6 +120,26 @@ def get_dataloaders(
         from .lm1b import get_dataloaders as _lm1b_get_dataloaders
         return _lm1b_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
+    if name in {"Proteins", "proteins", "SwissProt", "swissprot"}:
+        from .proteins import get_dataloaders as _proteins_get_dataloaders
+        return _proteins_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
+
+    if name in {"SwissProtDiMA", "swissprot_dima", "dima_swissprot"}:
+        train = get_dima_loader(config, split="train", batch_size=batch_size, shuffle=True, seed=seed)
+        val = get_dima_loader(config, split="val", batch_size=batch_size, shuffle=False, seed=seed)
+        test = get_dima_loader(config, split="test", batch_size=batch_size, shuffle=False, seed=seed)
+        return train, val, test
+    if name in {"EvoDiffUniRef50", "evodiff_uniref50", "uniref50_evodiff"}:
+        train = get_evodiff_uniref50_loader(config, split="train", batch_size=batch_size, shuffle=True, seed=seed)
+        val = get_evodiff_uniref50_loader(config, split="val", batch_size=batch_size, shuffle=False, seed=seed)
+        test = get_evodiff_uniref50_loader(config, split="test", batch_size=batch_size, shuffle=False, seed=seed)
+        return train, val, test
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+        train = get_multimodal_loader(config, split="train", batch_size=batch_size, shuffle=True, seed=seed)
+        val = get_multimodal_loader(config, split="val", batch_size=batch_size, shuffle=False, seed=seed)
+        return train, val, None
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'SwissProt'."
     )

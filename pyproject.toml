@@ -1,0 +1,167 @@
+# Project metadata and dependency declaration for uv (plan 12.1).
+#
+# This single project declares the whole system: the core training/sampling
+# stack as the default dependencies, and the DPLM structure tokenizer / folding
+# stack and the protein evaluation stack as optional extras. The default
+# `uv sync` installs the core stack with a modern transformers; enabling the
+# `dplm-inference` extra pins transformers to the DPLM-tested 4.39.2 and numpy to
+# <2.0 for that combined environment. Install the extra you need:
+#   uv sync                      # core training / sampling
+#   uv sync --extra dplm-inference   # + DPLM structure tokenizer / folding
+#   uv sync --extra protein-eval     # + protein evaluation helpers
+#   uv sync --group dev              # + ruff / vulture
+#
+# torch and torchvision are intentionally NOT declared here. They are installed
+# separately from the CUDA wheel index (cu128 / Blackwell sm_120) by setup.sh,
+# so that the CUDA build stays matched to the GPU. See setup.sh for details.
+#
+# The dependency pins below mirror requirements.txt (core),
+# requirements-dplm-inference.txt (dplm-inference), and
+# requirements-protein-eval.txt (protein-eval). After editing this file,
+# regenerate and commit uv.lock so the resolved versions are reproducible.
+
+[project]
+name = "bitstream-diffusion"
+version = "0.1.0"
+description = "CoBit: Language Modeling with Bitstream Diffusion (text + protein runs)."
+requires-python = ">=3.11"
+
+# Shared base: the conflict-free dependencies common to every environment. torch
+# and torchvision are omitted on purpose and installed via the CUDA index; see
+# the comment at the top of this file and setup.sh. The HuggingFace text stack
+# lives in the `train` extra rather than here because its transformers pin
+# conflicts with the DPLM inference stack; keeping the base free of that pin lets
+# uv resolve all extras into a single lock.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+    "filelock>=3.13",
+    "ml_collections>=0.1.1",
+    "omegaconf>=2.3",
+    "einops>=0.7",
+    "huggingface_hub>=0.23",
+    "matplotlib>=3.8",
+    "wandb>=0.28.1",
+]
+
+[project.optional-dependencies]
+
+# Core training / sampling text stack (mirrors requirements.txt). This is the
+# default environment for running the models: `uv sync --extra train`.
+train = [
+    "transformers>=4.39,<4.50",
+    "tokenizers>=0.19",
+    "datasets>=2.18",
+    "accelerate>=0.30",
+    "tensorboard>=2.15",
+    "mauve-text>=0.4.0",
+    "gdown>=5.1",
+    "gensim>=4.3",
+]
+
+# DPLM structure tokenizer plus folding/inference dependencies (mirrors
+# requirements-dplm-inference.txt). Its transformers==4.39.2 pin conflicts with
+# the `train` extra, so the two are declared conflicting in [tool.uv] below and
+# uv locks them in separate forks. Install into a dedicated environment.
+dplm-inference = [
+    "pytorch-lightning==2.2.0",
+    "torchmetrics>=1.3",
+    "hydra-core>=1.3,<1.4",
+    "omegaconf>=2.3",
+    "transformers==4.39.2",
+    "tokenizers>=0.15",
+    "huggingface_hub>=0.23",
+    "fair-esm>=2.0",
+    "biopython>=1.79",
+    "biotite>=0.39",
+    "einops>=0.7",
+    "numpy>=1.25,<2.0",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "rich>=13",
+    "pyrootutils>=1.0",
+    "python-dotenv>=1.0",
+    "dm-tree>=0.1.8",
+    "e3nn>=0.5",
+    "peft==0.11.1",
+    "tmtools>=0.2",
+    "tqdm>=4.66",
+    # byprot (the DPLM package) eagerly imports its datamodules, which pull these
+    # in; needed to load the frozen structure tokenizer for M1/M2 encoding + eval
+    # decode. (mdtraj>=1.11 bumps numpy to 2.x; pin lower if e3nn/torch_geometric
+    # complain at encode time.)
+    "datasets>=2.19,<3",
+    "mdtraj>=1.9",
+]
+
+# Protein evaluation stack for the ProteinMPNN / Foldseek / MMseqs2 / ESMFold /
+# TM-score ecosystem (mirrors requirements-protein-eval.txt). The command-line
+# tools (foldseek, mmseqs, us-align, ProteinMPNN) are installed separately by
+# scripts/proteins/setup_evaluation.sh; only the Python-side helpers are pinned
+# here.
+protein-eval = [
+    "sentencepiece>=0.2",
+    "protobuf>=4.25",
+    "biopython>=1.83",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "safetensors>=0.4",
+]
+
+# This is a flat-layout research repository, not an installable package. Mark it
+# as a non-package project so uv manages dependencies without trying to build or
+# install the source tree.
+[tool.uv]
+package = false
+
+# The train stack (modern transformers) and the DPLM inference stack
+# (transformers==4.39.2, tokenizers<0.19) cannot share one interpreter. Declaring
+# them as conflicting lets uv build one lock with the two resolved in separate
+# forks; enabling both extras at once is rejected.
+conflicts = [
+    [
+        { extra = "train" },
+        { extra = "dplm-inference" },
+    ],
+]
+
+# Lint and format tooling, installed with `uv sync --group dev`.
+[dependency-groups]
+dev = [
+    "ruff>=0.15",
+    "vulture>=2.16",
+]
+
+# Ruff drives both formatting and lint. The house style is 79 columns.
+[tool.ruff]
+line-length = 79
+target-version = "py311"
+
+[tool.ruff.lint]
+# Conservative rule set: pyflakes catches unused imports and names (the
+# dead-code signal), pycodestyle errors catch broken syntax, and isort keeps
+# import blocks tidy. E741 (ambiguous single-letter names) is allowed because
+# the diffusion model deliberately uses l, e, h for layer/embed/head dims.
+select = ["F", "E4", "E7", "E9", "I"]
+ignore = ["E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "data", "models", "diffusion", "trainers", "utils", "evaluation",
+    "configs", "scripts", "autoregression",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone CLI drivers and preparation scripts insert the repository root on
+# sys.path before importing repo modules so they run both as `python -m ...` and
+# as direct scripts. That makes the repo imports follow a statement, which is an
+# intentional E402, not a style defect.
+"scripts/**/*.py" = ["E402"]
+"evaluation/proteins/*.py" = ["E402"]
+
+# Vulture dead-code scan defaults. Run with `vulture . --min-confidence 80`.
+[tool.vulture]
+min_confidence = 80
+paths = ["data", "models", "diffusion", "trainers", "utils", "evaluation"]
+exclude = [".venv/", "external/", "runs/", "datasets/"]

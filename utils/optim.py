@@ -60,11 +60,21 @@ class WarmUpScheduler:
 
 # ───────────────────────── optimiser factory ──────────────────────────────
 
-def get_optimizer_and_scheduler(model: nn.Module, cfg, global_step: int = 0) -> Tuple[optim.Optimizer, object]:
-    """Return `(optimizer, scheduler)` based on `cfg.optim` fields."""
+def get_optimizer_and_scheduler(
+    model: nn.Module, cfg, global_step: int = 0, params=None
+) -> Tuple[optim.Optimizer, object]:
+    """Return `(optimizer, scheduler)` based on `cfg.optim` fields.
+
+    ``params`` optionally overrides ``model.parameters()`` with an explicit
+    parameter iterable or a list of param-group dicts (e.g. a separate lower-LR
+    trunk group for multimodal warm start). When ``None`` the behaviour is
+    unchanged.
+    """
     o_cfg = cfg.optim
     lr = o_cfg.get("lr", 1e-4)
     wd = o_cfg.get("weight_decay", 1e-2)
+
+    opt_params = model.parameters() if params is None else params
 
     opt_name = o_cfg.get("optimizer", "adamw").lower()
 
@@ -74,7 +84,7 @@ def get_optimizer_and_scheduler(model: nn.Module, cfg, global_step: int = 0) -> 
         beta2 = o_cfg.get("beta2", 0.95)
         eps = o_cfg.get("eps", 1e-8)
         opt = optim.AdamW(
-            model.parameters(),
+            opt_params,
             lr=lr,
             betas=(beta1, beta2),
             eps=eps,
@@ -86,7 +96,7 @@ def get_optimizer_and_scheduler(model: nn.Module, cfg, global_step: int = 0) -> 
         beta2 = o_cfg.get("beta2", 0.99)
         eps = o_cfg.get("eps", 1e-8)
         opt = optim.Adam(
-            model.parameters(),
+            opt_params,
             lr=lr,
             betas=(beta1, beta2),
             eps=eps,
@@ -104,6 +114,7 @@ def get_optimizer_and_scheduler(model: nn.Module, cfg, global_step: int = 0) -> 
             warmup_steps=warmup,
             total_steps=total_steps,
             base_lr=lr,
+            min_lr=float(o_cfg.get("min_lr", 1e-6)),
             global_step=global_step,
         )
     elif sched_type in {"constant", "warmup_only", "none"}:

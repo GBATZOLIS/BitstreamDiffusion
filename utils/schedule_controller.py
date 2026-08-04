@@ -24,6 +24,30 @@ def _generalized_regularizer(sigmas: torch.Tensor, c: float, n: float) -> torch.
     return x / (1.0 + x)
 
 
+def _blend_entropy_with_base(
+    learned_pdf: torch.Tensor,
+    base_pdf: torch.Tensor,
+    count: torch.Tensor,
+    min_per_bin: int,
+    base_fraction: float,
+) -> torch.Tensor:
+    """Coverage-smooth a learned PDF and apply an explicit base floor."""
+    if not 0.0 <= float(base_fraction) <= 1.0:
+        raise ValueError(
+            "cfg.train.entropy_base_fraction must be in [0, 1], "
+            f"got {base_fraction}"
+        )
+    learned_pdf = learned_pdf.float().clamp_min(0.0)
+    base_pdf = base_pdf.float().clamp_min(0.0)
+    learned_pdf = learned_pdf / learned_pdf.sum().clamp_min(1e-12)
+    base_pdf = base_pdf / base_pdf.sum().clamp_min(1e-12)
+    reliability = (count.float() / float(max(1, min_per_bin))).clamp(0.0, 1.0)
+    coverage_pdf = reliability * learned_pdf + (1.0 - reliability) * base_pdf
+    coverage_pdf = coverage_pdf / coverage_pdf.sum().clamp_min(1e-12)
+    pdf = (1.0 - float(base_fraction)) * coverage_pdf + float(base_fraction) * base_pdf
+    return pdf.clamp_min(0.0) / pdf.sum().clamp_min(1e-12)
+
+
 class EntropyScheduleController:
     """
     Entropy-rate based sigma scheduling for continuous diffusion.
@@ -134,6 +158,26 @@ class EntropyScheduleController:
         num_bins = int(getattr(self.trainer, "entropy_num_bins", 256))
         min_per_bin = int(getattr(self.trainer.cfg.train, "entropy_min_per_bin", 10))
         return buf_len >= (num_bins * min_per_bin)
+
+    def _base_bin_pdf(self, edges: torch.Tensor) -> torch.Tensor:
+        """Return truncated base-sigma probability mass for each bin."""
+        edges = edges.detach().to("cpu", dtype=torch.float64).clamp_min(1e-12)
+        strategy = str(
+            getattr(self.trainer.cfg.train, "sigma_sampling_strategy", "log-uniform")
+        ).lower()
+        if strategy == "log-normal":
+            cfg_cont = self.trainer.cfg.diffusion.continuous
+            mean = float(getattr(cfg_cont, "p_mean", -1.2))
+            std = max(float(getattr(cfg_cont, "p_std", 1.2)), 1e-12)
+            z = (edges.log() - mean) / (std * math.sqrt(2.0))
+            cdf = 0.5 * (1.0 + torch.erf(z))
+            mass = (cdf[1:] - cdf[:-1]).clamp_min(0.0)
+        else:
+            mass = (edges[1:].log() - edges[:-1].log()).clamp_min(0.0)
+        total = float(mass.sum().item())
+        if not math.isfinite(total) or total <= 0.0:
+            mass = torch.ones(edges.numel() - 1, dtype=torch.float64)
+        return (mass / mass.sum()).to(torch.float32)
 
     def _get_edges_on_device(self) -> torch.Tensor:
         """
@@ -514,12 +558,26 @@ class EntropyScheduleController:
 
         unnormalized = reg * rate_term
 
-        # Handle degeneracies / NaNs / all-zero
+        # Normalize the learned component before mixing it with probability mass
+        # from the configured base distribution.
         good = torch.isfinite(unnormalized).all() and float(unnormalized.sum().item()) > 0.0
         if not good:
-            pdf = torch.full((num_bins,), 1.0 / float(num_bins), dtype=torch.float32)
+            learned_pdf = self._base_bin_pdf(edges_sigma)
         else:
-            pdf = unnormalized / unnormalized.sum()
+            learned_pdf = unnormalized / unnormalized.sum()
+
+        base_pdf = self._base_bin_pdf(edges_sigma)
+
+        # Give entropy_min_per_bin a real per-bin meaning. Under-populated bins
+        # shrink toward the base distribution, so an empty bin cannot remain a
+        # permanent zero-probability state merely because it receives no samples.
+        min_per_bin = max(1, int(_cfg_get("entropy_min_per_bin", 10)))
+        # Explicit base-distribution floor. At 1 this is a pure base sampler; at
+        # 0 only the under-populated-bin coverage prior remains.
+        base_fraction = float(_cfg_get("entropy_base_fraction", 0.0))
+        pdf = _blend_entropy_with_base(
+            learned_pdf, base_pdf, count, min_per_bin, base_fraction
+        )
 
         # CDF must be monotone and end at 1
         cdf = torch.cumsum(pdf, dim=0)
@@ -550,13 +608,27 @@ class EntropyScheduleController:
         # Save + diagnostics
         if is_master:
             self.save_entropy_tables(pdf_dev, cdf_dev, mid_dev, edges_dev)
+            writer = getattr(self.trainer, "writer", None)
+            step = int(getattr(self.trainer, "global_step", 0))
+            if writer is not None:
+                writer.add_scalar("entropy/base_fraction", base_fraction, step)
+                writer.add_scalar(
+                    "entropy/underfilled_bins",
+                    int((count < float(min_per_bin)).sum().item()),
+                    step,
+                )
+                writer.add_scalar("entropy/min_bin_count", float(count.min().item()), step)
+                writer.add_histogram("entropy/bin_counts", count, step)
+                writer.add_histogram("entropy/final_pdf", pdf, step)
 
         self.fit_lognormal_to_entropy_profile()
 
         if is_master:
             print(
                 f"✓ Entropy schedule updated: FIFO={buf_len}/{cap}, bins={num_bins}, "
-                f"mode=regularized, c={c}, n={n}, power={power}"
+                f"mode=regularized, c={c}, n={n}, power={power}, "
+                f"base_fraction={base_fraction}, "
+                f"underfilled_bins={int((count < float(min_per_bin)).sum().item())}"
             )
 
 

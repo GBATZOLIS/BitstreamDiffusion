@@ -67,7 +67,7 @@ class DenoisingWorker:
         if not ckpt_path.exists():
              raise FileNotFoundError(f"Checkpoint not found for {cfg_path}")
 
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         ema_helper = EMA(unwrap_all(self.model), decay=0.0)
         
         if "ema" in ckpt and ckpt["ema"] is not None:
