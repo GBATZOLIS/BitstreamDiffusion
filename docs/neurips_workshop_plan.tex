@@ -1,0 +1,200 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{booktabs,amsmath,amssymb,xcolor,hyperref,enumitem}
+\usepackage[T1]{fontenc}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+\newcommand{\have}{\textcolor{green!45!black}{\textbf{HAVE}}}
+\newcommand{\todo}{\textcolor{red!70!black}{\textbf{NEEDED}}}
+\newcommand{\drop}{\textcolor{gray}{\textbf{DROP}}}
+\setlist{nosep,leftmargin=1.4em}
+\title{\vspace{-1.5cm}\textbf{CoBit on Verifiable Tasks: a NeurIPS workshop plan}\\
+\large Minimum path to submission --- deadline Sat 29 Aug (5 days)}
+\author{}
+\date{Mon 24 Aug 2026}
+\begin{document}\maketitle\vspace{-1cm}
+
+\section{The claim, in one paragraph}
+
+Every published comparison on Sudoku and TinyGSM$\to$GSM8K --- ours included --- reports
+\emph{one sample per problem}. Under that metric the discrete diffusion models MDLM and Duo
+beat CoBit on GSM8K, but only when they use low-temperature decoding ($T{=}0.1$), which buys
+pass@1 by destroying sample diversity. We argue this is the wrong measurement for
+non-autoregressive reasoning models, and report the first \textbf{multi-sample (pass@$k$ /
+maj@$k$)} evaluation across methods. Our thesis: \emph{CoBit trades in the opposite direction
+--- it has lower pass@1 but substantially higher pass@$k$ --- and pass@$k$, not pass@1, is the
+quantity that bounds what post-training can realise.}
+
+\paragraph{Why pass@$k$ is the right proxy.} Yue et al.\ (NeurIPS 2025,
+\href{https://arxiv.org/pdf/2504.13837}{arXiv:2504.13837}) show RLVR mostly \emph{reallocates}
+probability mass among trajectories already in the base model's support: it raises pass@1 while
+often \emph{lowering} pass@$k$ at large $k$. Base-model pass@$k$ therefore upper-bounds what RL
+can extract. RL post-training for diffusion LMs exists but is masked-only
+(d1 / diffu-GRPO, ICLR 2026); continuous diffusion post-training is unexplored. So
+``how much headroom does a continuous bitstream dLLM have?'' is well-posed and unanswered.
+
+\paragraph{What we will \emph{not} claim.} pass@$k$ costs $k\times$ NFE. It is a
+\emph{headroom} measurement, not a matched-budget win. The paper must say this in the abstract,
+or a reviewer will say it for us.
+
+\section{Evidence already in hand (zero new compute)}
+
+\begin{center}\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Result & Value & Status & Use \\ \midrule
+Sudoku single-sample (E/M/H) & 98.5 / 91.7 / 65.9 & \have\ published & Table 1 anchor \\
+Sudoku churn sweep vs $\gamma$ & Table 16 of COLM ver. & \have & appendix \\
+GSM8K single-sample, 425k & 29.19\% published & \have & Table 2 anchor \\
+\quad independent reproduction & \textbf{29.42\%} (388/1319) & \have\ (this session) & validates pipeline \\
+GSM8K 500k checkpoint & 29.34\% (full 1319) & \have & \emph{training is saturated} \\
+Sudoku-hard maj@16 / pass@16 & $\approx$91\% / $\approx$94\% & \have\ (indicative $n$) & motivates E2 \\
+GSM8K maj@32 / pass@32 & 46.5\% / 59.8\% & \have\ (256-subset) & motivates E1 \\
+FKC temperature study & full negative w/ mechanism & \have & \S4 + appendix \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The two multi-sample rows are the reason this paper is worth writing: hard-Sudoku
+maj@16 of $\approx$91\% against a published single-sample 65.9\% (Duo: 58.4\%), and GSM8K
+pass@32 of 59.8\% against Duo's best-ever 36\%. Both are on reduced sample sets and must be
+re-run properly --- see E1/E2 --- but the effect size is not subtle.
+
+\section{The gap in the literature (verified, not assumed)}
+
+I read S-FLM (\href{https://arxiv.org/abs/2605.11125}{arXiv:2605.11125}) in full. It is the
+source of every baseline number in our Table 2/3.
+
+\begin{itemize}
+\item \textbf{No pass@$k$, no majority vote, no best-of-$n$, no oracle metric anywhere.}
+      Sudoku: exact match, 180 steps, \emph{one sample per puzzle}. GSM8K: $T{=}1$, 1024 steps,
+      \emph{one generated solution per problem}.
+\item \textbf{Their checkpoints are public} (\href{https://github.com/jdeschena/s-flm}{github.com/jdeschena/s-flm},
+      built on the Duo codebase). \emph{TinyGSM: all baselines released} --- AR, MDLM, Duo, FLM,
+      CANDI, S-FLM. Baseline pass@$k$ therefore needs \emph{sampling only, no training}.
+\item \textbf{Sudoku: no checkpoints released}, but training scripts exist and their paper
+      states Sudoku trains in under 2 hours on a single L40S.
+\end{itemize}
+
+\section{Minimum experiment set (the critical path)}
+
+Assume a 4--5 page workshop limit. Nine runs, all sampling, no training.
+
+\begin{center}\small
+\begin{tabular}{@{}llllr@{}}
+\toprule
+ID & Experiment & Config & Runs & GPU-h \\ \midrule
+E1 & CoBit GSM8K pass@$k$ & $K{=}16$, full 1319, 1024 NFE, $\gamma{=}0.41$ & 1 & 13.5 \\
+E2 & CoBit Sudoku pass@$k$ & $K{=}16$, full 2k $\times$ 3 diff., 180 NFE & 3 & $\sim$6 \\
+E3 & \textbf{Duo GSM8K pass@$k$ $\times$ T} & $K{=}8$, $T\in\{1.0,\,0.1\}$, 1024 NFE & 2 & 14 \\
+E4 & \textbf{MDLM GSM8K pass@$k$ $\times$ T} & $K{=}8$, $T\in\{1.0,\,0.1\}$, 1024 NFE & 2 & 14 \\
+E5 & S-FLM GSM8K pass@$k$ & $K{=}8$, $T{=}1$, top-1 velocity & 1 & 7 \\
+\midrule
+& & & \textbf{9} & \textbf{$\sim$55} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{E3/E4 are the paper.} They test the falsifiable prediction: if Duo's pass@8
+\emph{falls} as $T$ drops to the 0.1 setting that wins it pass@1, the diversity-for-headroom
+trade is demonstrated rather than asserted. Everything else is context.
+
+\paragraph{Two technical requirements.}
+(i) Use the unbiased Codex estimator $\text{pass@}k = 1-\binom{n-c}{k}\big/\binom{n}{k}$, so one
+$K{=}16$ run yields the \emph{whole} curve $k{=}1\ldots16$ rather than a single point; the
+matched cross-method region is then $k\le 8$.
+(ii) All numbers on the \emph{full} 1319 / full 2k. Our first-256 subset runs $\approx$6 points
+hot (35.6\% vs 29.4\% at identical config) --- a subset would silently invalidate every
+comparison.
+
+\section{Deliberately dropped}
+
+\begin{itemize}
+\item \drop\ \textbf{Sudoku baselines.} Needs training 4 models $\times$ 3 difficulties. Cite
+      published single-sample numbers instead and report CoBit pass@$k$ alone on Sudoku, stating
+      plainly that no prior work reports it.
+\item \drop\ \textbf{FLM / CANDI on GSM8K.} They score 0.3\% / 0.2\% single-sample; pass@$k$ of a
+      model that never solves anything is uninformative.
+\item \drop\ \textbf{New temperature/FKC compute.} The study is complete; it costs nothing to write up.
+\item \drop\ \textbf{LM1B, OWT, CoBit-M, CFG, $k>16$.} Different paper.
+\end{itemize}
+
+\section{HPC logistics (CSD3)}
+
+The TinyGSM checkpoints already live on CSD3 at
+\texttt{/rds/project/rds-LlrDsbHU5UM/gb511/projects/BitstreamDiffusion/runs/tasks/tinygsm} ---
+this is where we pulled them from, so E1 needs no data movement. Steps:
+
+\begin{enumerate}
+\item Push branch \texttt{tasks/fkc-temperature} (the GSM8K pass@$k$ eval wiring is currently
+      \emph{uncommitted local work}: \texttt{gsm8k\_eval.py}, \texttt{sandbox\_gsm8k.py},
+      plus the sweep scripts). \textbf{This is the one true blocker} --- nothing runs on HPC until it is pushed.
+\item Clone \texttt{s-flm} on CSD3, create its env, pull the TinyGSM checkpoints from HuggingFace.
+\item Add a pass@$k$ wrapper to their sampler: generate $K$ samples/problem, keep per-problem
+      correctness vectors, apply the unbiased estimator. Their eval already executes programs
+      in a sandbox, so this is a loop and a JSON field.
+\item Submit as array jobs, one cell per (model, $T$); each cell is a few GPU-hours.
+\end{enumerate}
+
+\section{Timeline}
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Day & Work & Gate \\ \midrule
+Mon 24 (today) & push branch; submit E1 + E2 on CSD3 & jobs queued \\
+Tue 25 & s-flm env + checkpoints; pass@$k$ wrapper; submit E3/E4 & \textbf{go/no-go on baselines} \\
+Wed 26 & E3/E4 land; E5 if clean; first figures & thesis confirmed or flipped \\
+Thu 27 & write: intro, setup, results, FKC section & full draft \\
+Fri 28 & polish, appendix, reproduction checks & submission-ready \\
+Sat 29 & buffer + submit & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Paper skeleton}
+
+\begin{itemize}
+\item \textbf{\S1 Intro} (0.75p). Single-sample accuracy mismeasures non-AR reasoning models;
+      low-$T$ buys pass@1 with diversity; pass@$k$ bounds post-training headroom.
+\item \textbf{\S2 Setup} (0.5p). S-FLM parity protocol, unchanged; multi-sample extension; the
+      $k\times$ NFE caveat stated up front.
+\item \textbf{\S3 Results} (1.5p). \textbf{Table 1} Sudoku pass@$k$/maj@$k$ vs published single-sample.
+      \textbf{Table 2} GSM8K pass@$k$ across methods $\times$ temperature.
+      \textbf{Fig 1} pass@$k$ vs $k$ per method. \textbf{Fig 2} pass@8 vs $T$ for Duo/MDLM (the money plot).
+\item \textbf{\S4 Why not sharpening?} (0.5p). The FKC negative, with mechanism --- free content.
+\item \textbf{\S5 Discussion} (0.25p). Headroom for continuous-dLLM post-training; d1/diffu-GRPO is masked-only.
+\item \textbf{Appendix.} FKC details, protocol, the 29.42\% reproduction, saturation at 500k.
+\end{itemize}
+
+\section{Risks, and what we do about each}
+
+\begin{center}\small
+\begin{tabular}{@{}p{5.3cm}p{9.3cm}@{}}
+\toprule
+Risk & Mitigation \\ \midrule
+\textbf{Duo's pass@$k$ does \emph{not} fall at low $T$} --- thesis flips &
+This is still a publishable finding (``low-$T$ is free: it costs no headroom''), but the paper
+becomes framing~2, ``strongest continuous model on verifiable tasks'', with pass@$k$ as support.
+Decide Wed, not Fri. \\[2pt]
+s-flm env / checkpoint mismatch eats a day &
+Fall back to CoBit-only pass@$k$ on both tasks + the observation that no prior work reports it.
+Weaker but still a complete paper. Gate this Tue. \\[2pt]
+CSD3 queue times &
+Submit E1/E2 today; use short array cells rather than one long job. \\[2pt]
+Reviewer: ``pass@$k$ is just more compute'' &
+Address in the abstract; report matched-NFE single-sample alongside; cite Yue et al.\ for why
+the quantity matters independently of budget. \\[2pt]
+Config traps (\texttt{sigma\_data}, test subset) &
+Both bit us this week. \texttt{sigma\_data}=0.399844765663147 must be passed explicitly (config
+default 0.5 is wrong and silent); all numbers on full test sets. Re-verify every table row against
+its JSON before submission. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{If you only do one thing}
+
+Run \textbf{E3} (Duo pass@8 at $T{=}1.0$ vs $T{=}0.1$). It is 14 GPU-hours, needs no training,
+and it alone decides whether the paper has a thesis or a table.
+
+\end{document}

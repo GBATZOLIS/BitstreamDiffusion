@@ -178,10 +178,13 @@ def _numbers_equal(pred, gold):
     return int(pred) == int(gold)
 
 
-def evaluate_samples(sample, answer, timeout_s):
-    """
-    sample: model output (string)
-    answer: GSM8K answer (string)
+def predict_answer(sample, timeout_s):
+    """Execute `sample` and return its normalized numeric answer, or None.
+
+    This is exactly the value `evaluate_samples` compares against gold, exposed
+    so multi-sample consumers (FKC particles) can vote over ANSWERS rather than
+    over program text — many distinct programs return the same number, so
+    text-level voting would badly under-count agreement.
     """
     code = _extract_code(sample)
 
@@ -191,7 +194,7 @@ def evaluate_samples(sample, answer, timeout_s):
 
             fn = ns.get("simple_math_problem", None)
             if fn is None:
-                return False
+                return None
 
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -200,10 +203,17 @@ def evaluate_samples(sample, answer, timeout_s):
                     out = fn()
 
     except (_Timeout, Exception):
-        return False
+        return None
 
-    gold = _extract_gold_answer(answer)
     out = _to_number(out)
     if out is None:
         out = _extract_text_answer(stdout.getvalue())
-    return _numbers_equal(out, gold)
+    return out
+
+
+def evaluate_samples(sample, answer, timeout_s):
+    """
+    sample: model output (string)
+    answer: GSM8K answer (string)
+    """
+    return _numbers_equal(predict_answer(sample, timeout_s), _extract_gold_answer(answer))
