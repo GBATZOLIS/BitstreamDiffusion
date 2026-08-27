@@ -1,248 +1,263 @@
-# Handoff: temperature scaling via Feynman–Kac correctors, and multi-sample (pass@k)
-# evaluation of CoBit on Sudoku and TinyGSM→GSM8K
-
-**Status:** paused and handed over. Everything below is reproducible from this branch.
-**Repo:** `github.com/GBATZOLIS/BitstreamDiffusion`  **Branch:** `tasks/fkc-temperature`
-**Date:** 26 Aug 2026  **Machine:** csic47 (2× A6000); checkpoints also on CSD3.
-
+---
+title: "Temperature scaling and multi-sample evaluation for CoBit on verifiable tasks"
+subtitle: "A research memo and handover"
+date: "csic47, August 2026 · github.com/GBATZOLIS/BitstreamDiffusion, branch `tasks/fkc-temperature`"
 ---
 
-## 0. Read this first (the five findings)
+# Why we started
 
-1. **The paper's GSM8K number reproduces.** 29.42% (388/1319) against the published 29.19%.
-   The pipeline is faithful, so everything downstream is interpretable.
-2. **Training is saturated.** The 500k checkpoint gives 29.34% — statistically identical to
-   425k's 29.42%. "Train longer" is not a lever any more.
-3. **Temperature scaling via FKC did not deliver.** With a *healthy* particle population
-   (ESS 10.97/64 at 1024 steps) tempering **significantly hurts**: −5.65 points
-   [−10.62, −0.88]. The apparent gains at 512 steps are mostly plain drift inflation,
-   reproducible with a **single particle** and no Feynman–Kac machinery at all.
-   **This negative is not airtight — see §2.4, which is the main thing to revisit.**
-4. **Integration steps are the only significant positive lever we found.** 512→1024 steps
-   gives +7.03 points [+1.95, +12.50] at one sample per problem.
-5. **Our pass@k thesis was refuted by our own experiment.** We predicted low-temperature
-   decoding buys discrete models pass@1 by spending the diversity that pass@k needs. It does
-   not: sharpening MDLM lifts pass@1 *and* pass@32 simultaneously, and Duo at T=0.1 beats
-   CoBit at every k.
+The CoBit paper makes one honest concession. On grade-school maths via executable code
+(TinyGSM→GSM8K) CoBit reaches about 29% accuracy, which beats every continuous diffusion or
+flow model by a wide margin and beats MDLM and Duo when those are sampled at standard
+temperature. But when MDLM and Duo are allowed their tuned low-temperature decoding (T≈0.1)
+they reach roughly 33% and 36%, and we fall behind. We wrote that this points to "a missing
+sharpening mechanism rather than a limitation of the bitstream representation", and left it as
+future work. This memo reports what happened when we tried to build that mechanism, and a
+second investigation that grew out of it.
 
----
+The difficulty is that low-temperature decoding has no obvious analogue for us. MDLM and Duo
+predict a categorical distribution over tokens and can raise its logits to a power. CoBit
+denoises a continuous bitstream; there is no categorical distribution to sharpen at sampling
+time. The naive substitute — sharpening the per-bit Bernoulli posterior — was tried earlier on
+Sudoku and collapses below about T=0.25, because sharpening bits independently drives samples
+off the valid-codeword manifold.
 
-## 1. Where everything is
+Feynman–Kac correctors offered a principled alternative. Instead of deforming the per-step
+distribution and hoping, one runs several particles, weights them by an importance weight
+derived from the tempered target, and resamples. With enough particles the population is
+distributed as p^β exactly. That is attractive precisely because it is not a heuristic: it
+states which distribution you are sampling from, and the correction is what makes the statement
+true. We had already built the machinery for Sudoku, where it did not help. The open question
+was whether GSM8K — a task with a genuine notion of correctness that the model might assign
+higher likelihood — would behave differently.
 
-| What | Path |
-|---|---|
-| GSM8K eval (FKC, A1, pass@k, maj@k) | `evaluation/tasks/gsm8k_eval.py` |
-| Sudoku eval (FKC, pass@k) | `evaluation/tasks/sudoku_eval.py` |
-| Shared execution grader | `evaluation/tasks/sandbox_gsm8k.py` |
-| FKC sampler + SMC | `diffusion/continuous/samplers.py`, `diffusion/continuous/smc.py` |
-| FKC correctness gates (23 assertions) | `tests/test_fkc.py` |
-| Sweep / probe / shard scripts | `scripts/tasks/*.sh` |
-| CSD3 array jobs + runbook | `scripts/hpc/passk_cobit_csd3.slurm`, `scripts/hpc/PASSK_HPC_README.md` |
-| Baseline (s-flm) patches | `external/s-flm-patches/` |
-| Every FKC cell we ran | `results/fkc_temperature_all_cells.csv` |
-| pass@k raw results | `results/gsm8k_passk_shardA/` |
-| Earlier Sudoku FKC study | `docs/fkc_temperature_findings.md`, `docs/fkc_temperature_report.md` |
-| Workshop plan | `docs/neurips_workshop_plan.pdf` |
+# What we found
 
-**Baselines** live in a separate clone of `github.com/jdeschena/s-flm` (the S-FLM paper's repo,
-which also ships MDLM/Duo/FLM/CANDI). We modified it; the modifications are vendored here as
-`external/s-flm-patches/passk_eval.patch` with instructions in that directory.
+The short version: temperature scaling did not deliver; the mechanism we thought we were
+studying turned out not to be the mechanism actually operating; and the most useful result came
+from something we were not looking for.
 
-Environment note: s-flm needs `flash_attn`. Building it cost an hour because pip's `torch`
-wheel was CUDA 13 while local `nvcc` is 12.1. The working recipe on csic47 was to **clone the
-existing `pytorch` conda env** (torch 2.5.1 / cu121 / flash_attn 2.5.9) and add s-flm's deps —
-see §5. Their README says they develop in the NGC PyTorch container, which is the better route
-on CSD3.
+## The promising phase, and why it misled us
 
----
+We first swept β at 512 integration steps with 32 particles. Per-particle accuracy rose
+monotonically, from 29.6% at β=1.01 to 32.1% at β=1.08 and 34.0% at β=1.15. No individual cell
+was significant against the control, but the trend across eight cells was (slope 95% CI
+[0.085, 0.705], p≈0.007 against zero slope). Diversity fell as accuracy rose, exactly as a
+temperature should behave. For a while this looked like the result we wanted.
 
-## 2. Part I — Temperature scaling via Feynman–Kac correctors
+Two observations dismantled it.
 
-### 2.1 What was implemented
+First, accuracy kept climbing well past the point where the particle cloud had collapsed. By
+β=1.15 the effective sample size was 1.0 out of 32 and the average number of distinct answers
+per problem was 1.18 — all thirty-two particles were returning the same thing. A Sequential
+Monte Carlo method whose population has degenerated to a point mass is not performing
+inference; whatever was improving accuracy, it was not the corrector.
 
-The goal was a *principled* low-temperature analogue for CoBit: sample from the tempered target
-p^β using a Feynman–Kac corrector (Skreta et al.), rather than the heuristic categorical
-temperature that MDLM/Duo use. Two mechanisms exist in the code:
+Second, and decisively, we reran the sweep with **a single particle**, no weights and no
+resampling, so β could act only through the drift. Accuracy still rose: 28.5% at the control,
+30.9% at β=1.10, 32.8% at β=1.20. Roughly four of the five points of apparent gain were
+reproducible with no Feynman–Kac machinery at all. The corrector itself contributed perhaps one
+to two points, never significantly.
 
-* **FKC tempering (`--sampler_kind fkc_em`).** K weighted particles per prompt targeting p^β.
-  β enters in *two* places, which matters for interpreting everything below:
-  1. the **proposal drift is scaled by β** — `samplers.py:2955`, `x = x + h * beta * d`;
-  2. the **importance weight** `½β(β−1)Δσ²‖s‖²`, which drives resampling.
-* **Track A1 score-temperature (`--score_temp_tau`).** Particle-free, zero extra NFE. Rescales
-  the PF-ODE score by κ(σ)=(v+σ²)/(τv+σ²): no effect at high σ, →1/τ as σ→0.
+The reason is visible in the code. β enters in two places, not one. It multiplies the
+importance weight, which is the intended tempering channel — but it also multiplies the entire
+probability-flow drift (`x = x + h·β·d`). At a coarse step count the integrator systematically
+undershoots, and inflating the drift by five or ten percent partially compensates for the
+discretisation error. That is a step-size correction wearing a temperature's clothing.
 
-Both are wired into Sudoku and (new, this work) GSM8K. All 23 FKC gates pass on this branch,
-including the two churn-interval regressions.
+## The test that settled it
 
-### 2.2 What we ran
+If β were genuinely a temperature, its benefit should not depend on how finely we integrate. If
+it compensates truncation error, it should help at coarse steps and hurt at fine ones, because
+the same inflation becomes an overshoot once the integrator is accurate.
 
-37 cells, all in `results/fkc_temperature_all_cells.csv`. The load-bearing ones:
+So we ran the configuration where the corrector is best behaved: 1024 steps, 64 particles,
+β=1.05. This is the only setting in the whole study where the population stayed healthy — an
+effective sample size of about 11 out of 64, and seven distinct answers per problem, rather
+than the near-total collapse seen elsewhere. Against a matched single-sample control on the
+same problems, tempering **lost 5.65 points** (95% CI [−10.62, −0.88]). The sign flipped, as
+the step-size hypothesis predicts, and this time the effect was significant.
 
-**(a) β at 1024 steps with a healthy population — the decisive test.**
+Meanwhile the plain step count mattered more than anything we were tuning. Going from 512 to
+1024 steps, with one sample and no temperature, gains 7.03 points (95% CI [+1.95, +12.50]). Our
+best tempered configuration at 512 steps — 34.0%, using 32 particles — is still worse than
+simply integrating properly with a single sample (35.5%). An uncomfortable comparison, but a
+clarifying one.
 
-| cell | ESS | pass@1-equivalent |
-|---|---|---|
-| β=1.05, K=64, 1024 steps | **10.97 / 64** | 29.5% |
-| β=1.0 control (K=1, 1024 steps, same problems) | – | **35.2%** |
-| paired difference | | **−5.65 [−10.62, −0.88]** |
+We also tested the one particle-free mechanism we had: a local score-temperature rescaling the
+score by κ(σ)=(v+σ²)/(τv+σ²), so that it sharpens only late in the trajectory. On Sudoku this
+had given a small, monotone, cliff-free gain of about two points. On GSM8K it gives +0.8 at
+τ=0.7, then degrades, and at τ=0.3 the model produces no executable programs at all. It does
+not transfer.
 
-This is the only configuration where the corrector ran with a genuinely healthy cloud, and
-tempering **significantly hurt**.
+## Where this leaves the sharpening question
 
-**(b) β at 512 steps — a real trend, but not from FKC.**
-Across β ∈ [1.01, 1.08] at K=32 the trend is significant (slope 95% CI [0.085, 0.705],
-p(slope≤0)=0.0066, ≈+2.7 points over the range). But:
+Our reading is that β behaves as a step-size correction rather than a temperature, and that
+none of the sharpening mechanisms available to us closes the gap to tuned low-temperature
+discrete diffusion. The one lever that clearly works — more integration steps — is not a
+sharpening mechanism, and the paper already operates at the good end of it.
 
-| configuration | best accuracy |
-|---|---|
-| K=32 corrected FKC, β=1.15 | 34.0% |
-| **K=1, drift only** (no weights, no resampling), β=1.20 | **32.8%** |
-| β=1.0 control | 28.5% |
+We would not present this as a settled negative, for the reasons below.
 
-So ~+4.3 of the ~+5.5 total is obtainable with **one particle** and no Feynman–Kac at all; the
-corrector adds ≈+1.2 (β=1.05) to +1.9 (β=1.08), neither individually significant.
+# Why we do not fully trust our own conclusion
 
-**(c) K-scaling does nothing.** K=64 vs K=32 at β=1.05, 512 steps: −0.06 [−2.21, +2.04].
+There is a difference between "temperature scaling does not help CoBit" and "our
+implementation and application of Feynman–Kac correctors did not help CoBit", and we cannot
+presently distinguish them.
 
-**(d) Diversity collapses as β rises.** `mean_distinct_answers` falls 6.17 → 0.95 and ESS
-2.12 → 1.00 over β ∈ [1.01, 1.20]; at β≥1.15 all 32 particles return the same answer, so the
-"32-particle run" is a 1-particle run in disguise.
+**We cannot see the quantity that would explain it.** The natural diagnostic is whether the FKC
+weight ranks samples by correctness. If the model's likelihood does not know which programs are
+right, concentrating probability mass cannot help, and the negative becomes mechanistic rather
+than incidental. We do measure this — and in the arm where the gain lives, the measurement is
+void. The reason is subtle. Resetting log-weights to zero after each resampling event is
+*correct* SMC: the weights have been consumed by the resampling, and carrying them forward
+would double-count the evidence. But we record the weight vector at the end of the trajectory,
+and at the β values of interest resampling fires at essentially every step including the last,
+so the recorded weights are uniform to eight decimal places (0.03125 = 1/32). The diagnostic
+reads exactly zero signal by construction. In the arms where resampling is disabled and weights
+survive the full path, a real signal appears: correct programs carry about 7% more accumulated
+weight than incorrect ones at β=1.08, and the separation grows with β as the ½β(β−1)
+coefficient predicts. That is weak, but it is not nothing — and it is the opposite of what we
+saw on Sudoku. Fixing it needs a non-reset cumulative path potential carried along the
+ancestry: diagnostic only, incapable of changing results, and the first thing anyone should do
+before drawing conclusions from this code.
 
-**(e) A1 score-temperature fails too.** At 1024 steps, n=256: τ=1.0 → 34.0%, τ=0.7 → 34.8%,
-τ=0.5 → 32.0%, **τ=0.3 → 0.0%** (total collapse — no valid programs). It does *not* transfer
-from Sudoku, where the same knob gave +2.2 monotone with no cliff.
+**Our particle counts may be hopeless rather than merely small.** The FKC log-weight is
+extensive in the number of unconstrained variables: every free bit contributes. Sudoku has
+about 356 free bits; GSM8K, at 512 tokens and 16 bits per token, has around 7,200. Weight
+variance grows accordingly, and the particle count needed to keep a population healthy grows
+roughly exponentially in that variance. We never exceeded 64 particles. The honest experiment
+may need hundreds or thousands — a distributed-sampling engineering problem rather than a
+hyperparameter sweep. Doubling from 32 to 64 changed nothing measurable (−0.06 points), which
+is consistent either with the effect being absent or with both counts being far below what the
+problem requires.
 
-**(f) Step count dominates everything.** 512→1024 at K=1: **+7.03 [+1.95, +12.50]**. The best
-512-step tempered configuration (34.0%) still loses to plain 1024-step single-sample (35.5%).
+**The proposal is only approximately right.** The EDM-churn proposal is exact at β=1 but only
+leading-order for β>1, because tempering does not commute with the Gaussian churn step; the
+code emits a warning saying so. Halving the step count makes the approximation worse, which is
+awkward given that the apparent gains all live at 512 steps. The refinement study the warning
+asks for was never run.
 
-### 2.3 Our reading
+**We barely explored the space.** Throughout, the resampling threshold stayed at half the
+particle count, the policy at ESS-triggered, the self-conditioning policy at "inherit", and the
+prior at its default. The alternatives already in the codebase — resampling every active step,
+the zero and stateless self-conditioning policies, confining resampling to the informative
+entropy band, the forward-marginal prior — were never tried on GSM8K. Nor did we vary β along
+the trajectory; every run used a constant.
 
-β behaves like a **step-size correction, not a temperature**. It inflates the whole PF-ODE
-drift; at 512 steps the integrator undershoots and the inflation compensates, and at 1024 steps
-the same inflation overshoots and hurts. That explains the sign flip with step count, why the
-optimum drifts upward as the schedule coarsens, and why K makes no difference.
+**Three knobs are entangled and were never separated.** β, the churn parameter γ, and the step
+count interact. γ was pinned at 0.41, the EDM stability ceiling, in every single cell, and the
+effective Langevin strength depends on the product of γ and the step count — so changing the
+schedule changes stochasticity and resolution together. Our central claim about the sign flip
+is confounded with having held γ fixed.
 
-### 2.4 **Why the student should not accept this negative** (the important section)
+**The comparison that matters is thin.** The experiment isolating whether the corrector earns
+its keep — corrected versus drift-only at matched β — was run at two β values, one step count,
+256 problems. It deserves more than we gave it.
 
-Eight concrete reasons the result may be an artefact of *our* implementation or application:
+Finally, the two-model classifier-free-guidance variant of FKC was never tested here, though
+the conditioning-dropout checkpoint it needs already exists on the cluster.
 
-1. **The diagnostic that would explain it is structurally blind.** `logw` is correctly reset at
-   every resampling event (standard SMC — the weights are consumed by resampling). But
-   `log_weights_final` is captured right after the last reset, and at β≥1.04 resampling fires
-   at essentially every step, so the recorded weights are **exactly uniform** (0.03125000 = 1/32
-   to eight decimals). We therefore *cannot measure* whether the FKC weight ranks correctness in
-   the arm where the gain lives. **Fix first:** accumulate a non-reset `cumulative_path_potential`
-   gathered along ancestry — purely diagnostic, cannot change results. This is audit item #6.
-   Where weights *do* survive a full path (naive arm), a real signal appears:
-   w(correct)/w(incorrect) = **1.0706** at β=1.08, growing with β as ½β(β−1) predicts.
-2. **K may be orders of magnitude too small.** The log-weight is *extensive in free bits*:
-   GSM8K has ~7168 (vs Sudoku's 356). SMC needs K to grow roughly like exp(Var log w). We never
-   exceeded K=64. A serious test might need K in the hundreds or thousands, which is a
-   distributed-sampling engineering problem, not a hyperparameter sweep.
-3. **The proposal is only leading-order.** `edm_churn` with β>1 is an approximation —
-   tempering does not commute with Gaussian churn (`_warn_churn_fkc_inexact`). Halving the step
-   count makes it worse, and we never ran the γᵢ = S_churn/N refinement study the warning asks
-   for.
-4. **The hyperparameter space is barely explored.** Fixed throughout: `ess_threshold=0.5`,
-   `resampling_policy=ess`, `sc_policy=inherit`, default `prior_mode`. Never tried on GSM8K:
-   `every_step_active`, `sc_policy ∈ {zero, stateless_two_pass}`, `resample_entropy_frac`,
-   or `prior_mode=forward_marginal_diag`.
-5. **β, γ and step count are entangled and were never gridded.** γ was pinned at 0.41 (the EDM
-   cap) in every cell. Effective Langevin strength is λ ≈ S_churn·π(log σ) with
-   S_churn = γ(N−1), so changing N changes stochasticity *and* resolution together. A proper
-   (β, γ, N) grid has not been run.
-6. **The corrected-vs-naive A/B is thin.** Two β values, one step count, n=256. That is the
-   experiment that isolates "does the corrector earn its keep", and it deserves more.
-7. **Only constant β.** Annealed or σ-dependent β schedules were never tried, though the
-   entropy-rate machinery to define one already exists.
-8. **CFG-FKC was never tested on GSM8K.** The Prop 3.1 two-model variant needs a
-   conditioning-dropout checkpoint; one exists on CSD3
-   (`runs/tasks/tinygsm/cobit_raw_binary_bits_cfg`) and was never used here.
+# The second investigation: how many samples does the model need?
 
-Also unfixed: audit items **#7–#10** (`final_unique_ancestors` mis-computed; per-batch seed
-reset correlates noise; Sudoku validity check ignores clue-consistency; pass@K over one SMC
-cloud is genealogically correlated, unlike K independent draws). See
+While setting this up we noticed something about the literature. Every published comparison on
+these two benchmarks — including the S-FLM paper that defines the protocol and supplies all our
+baseline numbers — evaluates with **one sample per problem**. No pass@k, no majority vote, no
+best-of-n anywhere.
+
+That gap matters for a specific reason. Recent work on reinforcement learning from verifiable
+rewards suggests RL largely redistributes probability mass among solutions the base model can
+already produce rather than creating new ones: it raises pass@1 while often lowering pass@k at
+large k. If so, a model's pass@k profile measures what post-training could eventually extract
+from it. Since post-training for diffusion language models so far exists only for masked
+models, asking how much latent capability a continuous bitstream model holds seemed both
+answerable and unanswered.
+
+We had a hypothesis, and it was wrong, which is the interesting part. The hypothesis was that
+low-temperature decoding buys pass@1 by spending diversity, and diversity is what pass@k needs.
+CoBit gets its accuracy from stochastic churn with no temperature, so we expected the profiles
+to cross — worse at k=1, better at large k — implying more post-training headroom than the
+single-sample number suggests.
+
+We measured it with thirty-two samples per problem for every method, on the same 256 randomly
+chosen test problems, with the same execution sandbox grading every output.
+
+| method                 | pass@1 | pass@4 | pass@8 | pass@32 | maj@32 |
+|------------------------|-------:|-------:|-------:|--------:|-------:|
+| CoBit (no temperature) |  29.1% |  46.4% |  53.5% |   66.0% |  45.7% |
+| Duo, T=0.1             |  37.1% |  61.4% |  70.2% |   83.6% |  61.3% |
+| MDLM, T=0.1            |  35.4% |  59.1% |  67.7% |   80.9% |  59.4% |
+| MDLM, T=1.0            |  16.1% |  38.4% |  49.9% |   68.0% |  52.3% |
+
+The curves do not cross. Duo at its tuned low temperature beats CoBit at every sampling budget
+and on majority vote. More interestingly, comparing MDLM at the two temperatures shows that
+sharpening lifts pass@1 from 16.1% to 35.4% *and* pass@32 from 68.0% to 80.9% simultaneously.
+Low-temperature decoding does not spend headroom; it adds it.
+
+There is a real effect in the predicted direction, but it is relative rather than absolute:
+sharpening flattens the climb from k=1 to k=32 from a factor of 4.2 to a factor of 2.3. The
+population does become less diverse — it simply starts from a high enough base that the
+absolute curve rises everywhere anyway. We had treated the multiplier as the figure of merit
+when the level is what matters.
+
+Two things are worth keeping. It is a genuine and slightly counterintuitive finding about a
+metric nobody in this literature reports, and it cuts against the RL intuition we borrowed. And
+CoBit's own headroom is substantial in absolute terms — 29.1% to 66.0%, with genuinely
+independent samples, since we ran them with the corrector disabled. It is simply not
+competitive with tuned discrete diffusion on this task.
+
+Sudoku is a different picture, and we did not finish it. CoBit is the strongest published model
+on all three difficulties, and earlier multi-sample runs during the FKC study suggested
+majority voting on hard puzzles lands near 91% against a single-sample 65.9%. That gap is large
+enough to be worth measuring properly, and Sudoku is where CoBit's case is strongest. We
+stopped to free the GPUs.
+
+# Where we would go next
+
+For a publishable result quickly, the multi-sample evaluation is much closer than the
+temperature work. It needs the GSM8K table completed — one baseline cell crashed on an
+integer-overflow bug in the baseline repository's metrics code, S-FLM was never run, and the
+numbers cover 256 of the 1,319 test problems — and it needs the Sudoku half, which is where
+CoBit leads. The infrastructure for all of it exists.
+
+To settle the temperature question properly, we would work in this order. Repair the weight
+diagnostic first: until then nobody can see whether the model's likelihood carries any
+correctness signal, and that single fact determines whether tempering could ever work here.
+Then push the particle count as far as the hardware allows, since the extensivity argument
+suggests our counts may be off by orders of magnitude rather than a factor of two. Then grid β
+against γ and the step count together, since the central claim about the sign flip is
+confounded by having held γ fixed. Only then revisit proposal accuracy and the untried
+resampling and self-conditioning policies.
+
+Our prior is that the negative will survive: the drift explanation accounts for the data
+economically and predicts the sign flip we observed. But it rests on diagnostics we know to be
+blind and particle counts we suspect are inadequate, and it would be wrong to record it as
+settled.
+
+# Appendix: what is where, and how to run it
+
+Everything is on branch `tasks/fkc-temperature` of `github.com/GBATZOLIS/BitstreamDiffusion`.
+
+The samplers are in `diffusion/continuous/samplers.py` and `diffusion/continuous/smc.py`, with
+23 correctness assertions in `tests/test_fkc.py` that should be kept green
+(`PYTHONPATH=. python tests/test_fkc.py`). The task evaluations are
+`evaluation/tasks/gsm8k_eval.py` and `evaluation/tasks/sudoku_eval.py`; both support FKC
+tempering, the score-temperature, and multi-sample metrics. Every FKC cell we ran is tabulated
+in `results/fkc_temperature_all_cells.csv` — 37 rows giving β, particle count, steps, effective
+sample size, resampling events, accuracy, majority vote, pass@k and diversity — and the pass@k
+results are in `results/gsm8k_passk_shardA/`. The earlier Sudoku study is in
 `docs/fkc_temperature_findings.md`.
 
----
+The baselines come from the S-FLM authors' repository, which also ships MDLM, Duo, FLM and
+CANDI checkpoints for TinyGSM. Our modifications to it — multi-sample sampling, the unbiased
+pass@k estimator, and a shared grader so every method is scored by identical code — are
+vendored as a patch in `external/s-flm-patches/`, with a README covering the environment
+(building flash-attn against a matching CUDA is the one real obstacle) and the test-set
+sharding scheme that lets runs on different machines be merged.
 
-## 3. Part II — Multi-sample (pass@k) evaluation
-
-### 3.1 Why
-
-No prior work in this comparison reports multi-sample metrics. We read S-FLM
-(arXiv:2605.11125) in full: Sudoku is scored with **one sample per puzzle**, GSM8K with **one
-generated solution per problem**, and pass@k / majority vote / best-of-n appear nowhere. Since
-S-FLM is the source of every baseline number in the CoBit draft, this is an open lane.
-pass@k also bounds what RL post-training can realise (Yue et al., arXiv:2504.13837), and
-diffusion-LM post-training so far is masked-only (d1 / diffu-GRPO).
-
-### 3.2 Protocol (identical for every method)
-
-K=32 samples/problem · 1024 steps · fp32 · the **same** 256 random test problems (seed 0,
-`external/s-flm-patches/data_gsm8k_shard_manifest.json`) · the **same** execution grader
-(their `sandbox_gsm8k.py` was byte-identical to ours apart from our `predict_answer` refactor,
-so we installed ours in both) · unbiased Codex estimator pass@k = 1 − C(n−c,k)/C(n,k), so one
-K=32 run yields the whole k=1…32 curve · maj@k votes over **executed answers**, not program
-text.
-
-### 3.3 Results (shard A, 256 problems)
-
-| method | pass@1 | pass@2 | pass@4 | pass@8 | pass@16 | **pass@32** | maj@32 |
-|---|---|---|---|---|---|---|---|
-| CoBit (no temperature) | 29.1% | 38.3% | 46.4% | 53.5% | 59.9% | 66.0% | 45.7% |
-| **Duo T=0.1** | **37.1%** | **50.2%** | **61.4%** | **70.2%** | **77.5%** | **83.6%** | **61.3%** |
-| MDLM T=0.1 | 35.4% | 48.1% | 59.1% | 67.7% | 74.7% | 80.9% | 59.4% |
-| MDLM T=1.0 | 16.1% | 26.3% | 38.4% | 49.9% | 59.7% | 68.0% | 52.3% |
-
-**The thesis is refuted.** Low-temperature decoding does not spend headroom to buy pass@1:
-sharpening MDLM lifts pass@1 (16.1→35.4%) *and* pass@32 (68.0→80.9%). The trade exists only in
-*relative* terms — the k=1→32 multiplier falls 4.2× → 2.3× — but the absolute curve rises
-everywhere. Duo at T=0.1 dominates CoBit at every k.
-
-CoBit's own headroom is real (29.1 → 66.0%, 2.3×, with ESS=32/32, i.e. 32 genuinely
-independent churn samples), just not competitive on GSM8K. On **Sudoku** CoBit remains the best
-model overall (98.5 / 91.7 / 65.9 single-sample vs Duo 96.3 / 84.7 / 58.4), and the earlier FKC
-study measured hard-Sudoku maj@16 ≈ 91% and pass@16 ≈ 94% — worth re-measuring properly.
-
-### 3.4 What is incomplete
-
-* `duo_T1.0` **crashed**: `OverflowError: int too large to convert to float` in their metrics
-  path (not OOM). Needed to complete Duo's temperature contrast.
-* **S-FLM cell never ran.** Runner exists (`external/s-flm-patches/passk_sfm.sh`, sphere-arch
-  config family, top-1 velocity = their best GSM8K variant) but is un-smoke-tested.
-* **Shard B (the other 1063 problems) not run.** CSD3 array jobs are written and pushed. Shards
-  are disjoint by construction, so merging is concatenation — `merge_passk.py`.
-* **Sudoku pass@k** started and was killed to free GPUs; baselines would need retraining
-  (no released Sudoku checkpoints, but their paper says <2 h each on one L40S).
-
----
-
-## 4. Part III — Traps that cost us time (do not rediscover these)
-
-1. **`sigma_data` is not in the TinyGSM checkpoints.** They predate the commit that persists it.
-   Pass `--sigma_data 0.399844765663147` explicitly. The config default is **0.5**, it is wrong,
-   and it fails silently.
-2. **Never use a test-set prefix as a subset.** The first 256 problems run ~6 points hot
-   (35.55% vs 29.42% at identical config). Use the seed-0 random shard.
-3. **The GSM8K result tag contains no checkpoint step**, and `out_dir` defaults to
-   `<run>/gsm8k_eval/`. Re-running a different checkpoint with default paths **overwrites** the
-   previous artifact. Always pass `--out_dir`.
-4. **Compare paired, not aggregate.** Per-prompt vectors are now stored
-   (`per_prompt_particle_acc`); between-prompt variance dominates and cancels only in the paired
-   difference.
-5. **Duo/MDLM default to fp64** (`sampler.use_float64: true`). fp32 is 2.75× faster; we measured
-   Duo T=1 fp32 at 19.5% vs 17.2% published, 95% CIs overlapping ([17.4, 21.6] vs [15.2, 19.2]),
-   and used fp32 throughout. **This must be stated in any write-up.**
-6. **The paper's 29.19% belongs to the main-run 425k checkpoint**, not the Isambard one
-   (which gives 28.96%). The artifact was simply never saved.
-
----
-
-## 5. How to run things
+A representative command, for thirty-two independent samples per problem:
 
 ```bash
-# CoBit: pass@k on GSM8K (K independent churn samples; beta=1, no resampling)
 python -m evaluation.tasks.gsm8k_eval \
   --config configs/tasks/tinygsm_bits.py \
   --checkpoint runs/tasks/tinygsm/cobit_raw_binary_bits/checkpoints/step=000425000.pt \
@@ -250,29 +265,23 @@ python -m evaluation.tasks.gsm8k_eval \
   --beta 1.0 --num_particles 32 --resampling_policy never --final_resample 0 \
   --steps 1024 --limit 1319 --batch_size 2 --ema 1 --seed 42 \
   --sigma_data 0.399844765663147 --out_dir <somewhere>
-
-# CoBit: FKC tempering (beta > 1 turns the corrector on)
-#   ... --beta 1.05 --resampling_policy ess --ess_threshold 0.5 --final_resample 1
-
-# CoBit: A1 score-temperature (particle-free, 1x NFE)
-#   ... --score_temp_tau 0.7
-
-# FKC gates (must stay green)
-PYTHONPATH=. python tests/test_fkc.py
-
-# Baselines: see external/s-flm-patches/README.md
 ```
 
----
+Setting `--beta 1.05 --resampling_policy ess --final_resample 1` turns the corrector on;
+`--score_temp_tau 0.7` selects the particle-free sharpening instead.
 
-## 6. Suggested order of work
+Four practical warnings, each of which cost us time. The `sigma_data` value is **not** stored in
+these checkpoints, which predate the commit that persists it: pass 0.399844765663147
+explicitly, because the configuration default of 0.5 is wrong and fails silently. Do not
+evaluate on a prefix of the test set — the first 256 problems are about six points easier than
+the full set and will flatter any method. The GSM8K output filename does not include the
+checkpoint step, so re-running a different checkpoint without setting `--out_dir` overwrites
+the previous result. And the baseline samplers default to double precision; we ran everything
+in single precision for a 2.75× speedup after checking that Duo's single-sample accuracy stays
+within its confidence interval (we measure 19.5% against 17.2% published, intervals
+overlapping), but any comparison must state this.
 
-1. **Fix audit #6** (non-reset cumulative path potential). Without it the corrected arm cannot
-   be diagnosed, and every FKC conclusion rests on an unmeasurable quantity. Cheap, diagnostic
-   only.
-2. **Finish the pass@k table**: fix `duo_T1.0`, run S-FLM, run shard B on CSD3, merge to the
-   full 1319. This is the part closest to publishable.
-3. **Sudoku multi-sample**, where CoBit is actually strongest — CoBit pass@k on all three
-   difficulties, and retrain the Duo/MDLM Sudoku baselines (cheap) for a like-for-like table.
-4. **Then** revisit FKC properly, with §2.4 as the checklist: larger K first, then the
-   (β, γ, N) grid, then proposal accuracy, then the untried policies.
+Two reproduction facts worth recording. The paper's headline 29.19% reproduces at 29.42%, and
+belongs to the main-run 425k checkpoint rather than the Isambard one; that artifact had simply
+never been saved. And the 500k checkpoint gives 29.34%, statistically indistinguishable from
+425k, so the training curve has flattened and further training is no longer a lever.
