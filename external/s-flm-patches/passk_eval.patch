@@ -1,0 +1,198 @@
+diff --git a/configs/config.yaml b/configs/config.yaml
+index 6f0f3b6..c4f630c 100644
+--- a/configs/config.yaml
++++ b/configs/config.yaml
+@@ -20,6 +20,7 @@ gsm8k:
+   input_file: null  # if set, skip sampling and evaluate directly from this JSON file
+   output_dir: ${cwd:}/gsm8k_eval
+   timeout: 5.0
++  num_samples: 1  # K samples per problem -> enables pass@k / maj@k
+   bootstrap_size: 1  # 1 = single estimate (std=0); >1 = N bootstrap resamples, report mean ± std
+ 
+ seed: 1
+diff --git a/main.py b/main.py
+index 08307c1..a5e1837 100644
+--- a/main.py
++++ b/main.py
+@@ -367,42 +367,46 @@ def _sample_gsm8k(diffusion_model, config, logger, tokenizer, fabric):
+   records = []
+   total_nfe = 0
+   num_batches = 0
+-  for batch_start in trange(
+-      0, len(local_indices), batch_size,
+-      desc=f'Rank {rank} sampling',
+-      disable=rank != 0):
+-    batch_indices = local_indices[
+-      batch_start:batch_start + batch_size]
+-    B = len(batch_indices)
+-
+-    all_ids = [torch.tensor(dataset[idx]['input_ids'])
+-               for idx in batch_indices]
+-    padded, lengths = _pad_prefix_batch(
+-      all_ids, fabric.device)
+-
+-    samples, metadata = model.generate_samples(
+-      num_samples=B,
+-      num_steps=config.sampler.steps,
+-      prefix_tokens=padded,
+-      prefix_lengths=lengths)
+-    total_nfe += metadata['nfe']
+-    num_batches += 1
+-
+-    for i, idx in enumerate(batch_indices):
+-      prompt_len = int(lengths[i])
+-      generated_ids = samples[i, prompt_len:].cpu().tolist()
+-
+-      response = tokenizer.decode(
+-        generated_ids, skip_special_tokens=True)
+-      records.append({
+-        'prompt': dataset[idx]['prompt'],
+-        'response_ground_truth':
+-          dataset[idx]['response_ground_truth'],
+-        'response': response,
+-      })
+-    # Cleanup memory for the next sampling batch
+-    del samples, metadata
+-    gc.collect()
++  num_samples = int(getattr(config.gsm8k, 'num_samples', 1))
++  for _rep in range(num_samples):
++   for batch_start in trange(
++       0, len(local_indices), batch_size,
++       desc=f'Rank {rank} sampling',
++       disable=rank != 0):
++     batch_indices = local_indices[
++       batch_start:batch_start + batch_size]
++     B = len(batch_indices)
++
++     all_ids = [torch.tensor(dataset[idx]['input_ids'])
++                for idx in batch_indices]
++     padded, lengths = _pad_prefix_batch(
++       all_ids, fabric.device)
++
++     samples, metadata = model.generate_samples(
++       num_samples=B,
++       num_steps=config.sampler.steps,
++       prefix_tokens=padded,
++       prefix_lengths=lengths)
++     total_nfe += metadata['nfe']
++     num_batches += 1
++
++     for i, idx in enumerate(batch_indices):
++       prompt_len = int(lengths[i])
++       generated_ids = samples[i, prompt_len:].cpu().tolist()
++
++       response = tokenizer.decode(
++         generated_ids, skip_special_tokens=True)
++       records.append({
++         'problem_idx': int(idx),
++         'rep': int(_rep),
++         'prompt': dataset[idx]['prompt'],
++         'response_ground_truth':
++           dataset[idx]['response_ground_truth'],
++         'response': response,
++       })
++     # Cleanup memory for the next sampling batch
++     del samples, metadata
++     gc.collect()
+ 
+   avg_nfe = total_nfe / max(num_batches, 1)
+   logger.info(f'Rank {rank}: average NFE per batch: {avg_nfe:.1f}')
+@@ -480,7 +484,46 @@ def _gsm8k_eval(diffusion_model, config, logger, tokenizer):
+ 
+     os.makedirs(config.gsm8k.output_dir, exist_ok=True)
+     merged_path = os.path.join(config.gsm8k.output_dir, 'results.json')
++    # attach per-record grade so disjoint shards can be merged later
++    for rec, ok in zip(samples, per_sample_correct):
++      rec['correct'] = int(ok)
++
++    # ---- multi-sample metrics (pass@k, maj@k) when num_samples > 1 ----
++    # pass@k uses the unbiased Codex estimator 1 - C(n-c,k)/C(n,k), so ONE run at
++    # K samples/problem yields the whole curve k=1..K. maj@k is self-consistency:
++    # a plurality vote over EXECUTED answers, graded by the identical sandbox
++    # used for every method in the comparison.
++    multi = None
++    if any('problem_idx' in r for r in samples):
++      from collections import defaultdict, Counter
++      from math import comb
++      by_prob = defaultdict(list)
++      for rec, ok in zip(samples, per_sample_correct):
++        by_prob[rec['problem_idx']].append((int(ok), rec['response'],
++                                            rec['response_ground_truth']))
++      K = min(len(v) for v in by_prob.values())
++      def pass_at_k(n, c, k):
++        if n - c < k: return 1.0
++        return 1.0 - comb(n - c, k) / comb(n, k)
++      curve = {}
++      for k in range(1, K + 1):
++        curve[k] = float(np.mean([pass_at_k(len(v), sum(x[0] for x in v), k)
++                                  for v in by_prob.values()]))
++      maj = 0
++      for v in by_prob.values():
++        gold = sandbox_gsm8k._extract_gold_answer(v[0][2])
++        preds = [sandbox_gsm8k.predict_answer(r, config.gsm8k.timeout) for _, r, _ in v]
++        preds = [x for x in preds if x is not None]
++        if preds:
++          top = max(Counter(preds).items(), key=lambda kv: (kv[1], -float(kv[0])))
++          maj += int(bool(sandbox_gsm8k._numbers_equal(top[0], gold)))
++      multi = {'num_problems': len(by_prob), 'K': K,
++               'pass_at_k': curve, 'maj_at_K': maj / max(1, len(by_prob))}
++      logger.info(f"pass@1={curve[1]*100:.2f}%  pass@{K}={curve[K]*100:.2f}%  "
++                  f"maj@{K}={multi['maj_at_K']*100:.2f}%  ({len(by_prob)} problems)")
++
+     results = {'accuracy': acc,
++               'multi_sample': multi,
+                'accuracy_se': acc_se,
+                'accuracy_ci_lo': acc_ci_lo,
+                'accuracy_ci_hi': acc_ci_hi,
+diff --git a/sandbox_gsm8k.py b/sandbox_gsm8k.py
+index 4f82e48..f5ecc43 100644
+--- a/sandbox_gsm8k.py
++++ b/sandbox_gsm8k.py
+@@ -178,10 +178,13 @@ def _numbers_equal(pred, gold):
+     return int(pred) == int(gold)
+ 
+ 
+-def evaluate_samples(sample, answer, timeout_s):
+-    """
+-    sample: model output (string)
+-    answer: GSM8K answer (string)
++def predict_answer(sample, timeout_s):
++    """Execute `sample` and return its normalized numeric answer, or None.
++
++    This is exactly the value `evaluate_samples` compares against gold, exposed
++    so multi-sample consumers (FKC particles) can vote over ANSWERS rather than
++    over program text — many distinct programs return the same number, so
++    text-level voting would badly under-count agreement.
+     """
+     code = _extract_code(sample)
+ 
+@@ -191,7 +194,7 @@ def evaluate_samples(sample, answer, timeout_s):
+ 
+             fn = ns.get("simple_math_problem", None)
+             if fn is None:
+-                return False
++                return None
+ 
+             stdout = io.StringIO()
+             stderr = io.StringIO()
+@@ -200,10 +203,17 @@ def evaluate_samples(sample, answer, timeout_s):
+                     out = fn()
+ 
+     except (_Timeout, Exception):
+-        return False
++        return None
+ 
+-    gold = _extract_gold_answer(answer)
+     out = _to_number(out)
+     if out is None:
+         out = _extract_text_answer(stdout.getvalue())
+-    return _numbers_equal(out, gold)
++    return out
++
++
++def evaluate_samples(sample, answer, timeout_s):
++    """
++    sample: model output (string)
++    answer: GSM8K answer (string)
++    """
++    return _numbers_equal(predict_answer(sample, timeout_s), _extract_gold_answer(answer))
