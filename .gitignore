@@ -76,3 +76,5 @@ core.*
 smoke_logs/
 datasets/
 runs/
+train_logs/
+results/
