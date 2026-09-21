@@ -8,6 +8,7 @@ from ml_collections import config_dict
 from .openwebtext import OpenWebTextDataset
 from .lm1b import LM1BDataset
 from .textaudio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
+from .mnist_sum_bits import MNISTSumBitsDataset, get_dataloaders as _mnist_sum_get_dataloaders
 
 Split = Literal["train", "val", "test"]
 
@@ -78,8 +79,14 @@ def get_loader(
             ds = TextAudioDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- MNIST-Sum (image+text bitstream) ----------------
+    if name in {"MNISTSumBits", "mnist_sum_bits"}:
+        ds = MNISTSumBitsDataset(config, split=split)
+        return _make_direct_loader(ds)
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'Textaudio'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
+        "'Textaudio', 'MNISTSumBits'."
     )
 
 
@@ -106,6 +113,10 @@ def get_dataloaders(
         from .textaudio import get_dataloaders as _textaudio_get_dataloaders
         return _textaudio_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
+    if name in {"MNISTSumBits", "mnist_sum_bits"}:
+        return _mnist_sum_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', 'Textaudio'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
+        "'Textaudio', 'MNISTSumBits'."
     )

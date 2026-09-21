@@ -38,7 +38,14 @@ from utils.callbacks import (
     VisualizationCallback,
     TextAudioCallback
 )
-from utils.textaudio_utils import _sample_tasks_and_cond_masks, UNCONDITIONAL
+# utils.textaudio_utils is imported lazily at its use site: its module level
+# pulls in the full speech stack (jiwer / fairseq / s3prl / NeMo, see
+# textaudio_install.sh), which made every non-audio config -- including
+# MNIST-Sum -- unrunnable without installing it. UNCONDITIONAL is a plain
+# constant and is re-declared here so the dispatch below stays importable.
+from utils.mnist_sum_utils import _sample_regimes_and_cond_masks
+
+UNCONDITIONAL = 0  # mirrors utils.textaudio_utils.UNCONDITIONAL
 
 
 from utils.schedule_controller import EntropyScheduleController
@@ -1134,6 +1141,16 @@ class Trainer:
 
                 self.callbacks.append(TextAudioCallback(cfg))
 
+            # MNIST-Sum: exact image->text accuracy + text->image samples.
+            # NOTE: MNISTSumEvalCallback sets run_on_all_ranks = True and that is
+            # load-bearing -- sampling rank-0-only through the compiled DDP module
+            # wedges the NEXT training step (rank 0 recompiles for shapes the other
+            # ranks never see). Do not "optimise" it to rank 0.
+            ms_cfg = getattr(cfg.train, "mnist_sum_eval", None)
+            if ms_cfg is not None and bool(getattr(ms_cfg, "enabled", False)):
+                from utils.callbacks import MNISTSumEvalCallback
+                self.callbacks.append(MNISTSumEvalCallback(cfg))
+
         elif cfg.framework == "discrete_sedd":
             self.proc = DiscreteForwardProcess(cfg)
             self.loss_fn = dwdse_loss
@@ -1513,14 +1530,27 @@ class Trainer:
         # ------------------------------------------------------------------
         cond_cfg = getattr(self.cfg, "cond", None)
         cond_enabled_cfg = (cond_cfg is not None) and bool(getattr(cond_cfg, "enabled", False))
+        cond_mode = str(getattr(cond_cfg, "cond_mode", "")).lower() if cond_cfg is not None else ""
 
+        # protect_mask: positions held at their TRUE values even when CFG drops
+        # the conditioning modality (the markers, under multimodal_mask).
+        # None for the legacy and text+audio modes, which have no such positions.
+        protect_mask = None
+        cond_text_audio = False
         if not cond_enabled_cfg:
             cond_enabled = False
             prefix_mask = None
             cL_pos = None
+        elif cond_mode == "multimodal_mask":
+            cL_pos = None
+            _, prefix_mask, protect_mask = _sample_regimes_and_cond_masks(
+                self.cfg, B, S, device=self.device
+            )
+            cond_enabled = True
         else:
             cond_text_audio = bool(getattr(cond_cfg, 'downstream', False))
             if cond_text_audio:
+                from utils.textaudio_utils import _sample_tasks_and_cond_masks
                 bpt = int(getattr(self.cfg.data, 'bits_per_token', 18)) if not is_cont_tokens else 1
                 task_ids, prefix_mask = _sample_tasks_and_cond_masks(
                     self.cfg, B, S, device=self.device, bits_per_token=bpt
@@ -1572,9 +1602,13 @@ class Trainer:
             if drop_mask.any():
                 if is_cont_tokens:
                     replace = drop_mask.view(B, 1, 1) & prefix_mask.unsqueeze(-1)
+                    if protect_mask is not None:
+                        replace = replace & (~protect_mask).unsqueeze(-1)
                     prefix_used_full[replace] = null_full[replace]
                 else:
                     replace = drop_mask.view(B, 1) & prefix_mask
+                    if protect_mask is not None:
+                        replace = replace & (~protect_mask)
                     prefix_used_full[replace] = null_full[replace]
 
             del null_full

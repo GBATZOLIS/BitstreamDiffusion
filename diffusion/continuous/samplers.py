@@ -464,6 +464,7 @@ def _build_mask_conditioning(
     cond_prefix_mask: Optional[torch.Tensor],
     conditioning_prefix: Optional[torch.Tensor],
     cond_len_bits: Optional[int],
+    protect_mask: Optional[torch.Tensor] = None,
     is_cont_tokens: bool = False,
     vocab_size: int = 2,
 ) -> Tuple[bool, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -556,6 +557,32 @@ def _build_mask_conditioning(
             is_cont_tokens=is_cont_tokens,
             vocab_size=vocab_size,
         )
+        # Structural positions (e.g. multimodal markers) must stay clean even in
+        # the unconditional/null CFG branch -- restore them to their true value
+        # so they are never nulled to 0.5. Matches training, where the
+        # conditioning segments are dropped but the markers never are.
+        if protect_mask is not None:
+            pmsk = protect_mask.to(device=device)
+            if pmsk.dtype != torch.bool:
+                pmsk = pmsk.to(torch.bool)
+            if pmsk.dim() == 1:
+                if pmsk.numel() != S:
+                    raise ValueError(
+                        f"protect_mask has length {pmsk.numel()} but expected S={S}"
+                    )
+                pmsk = pmsk.view(1, S).expand(pf.size(0), S)
+            elif pmsk.dim() == 2:
+                if pmsk.size(0) != pf.size(0) or pmsk.size(1) != S:
+                    raise ValueError(
+                        f"protect_mask must be [B,S]; got {tuple(pmsk.shape)}"
+                    )
+            else:
+                raise ValueError("protect_mask must have shape [S] or [B,S]")
+            if is_cont_tokens:
+                pmsk_e = pmsk.unsqueeze(-1).expand_as(null_full)
+                null_full[pmsk_e] = pf[pmsk_e]
+            else:
+                null_full[pmsk] = pf[pmsk]
         return True, pf, pm, null_full
 
     # ------------------------------------------------------------------
@@ -991,6 +1018,7 @@ class HeunSampler:
         cond_prefix_mask: Optional[torch.Tensor] = None,
         conditioning_prefix: Optional[torch.Tensor] = None,
         cond_len_bits: Optional[int] = None,
+        protect_mask: Optional[torch.Tensor] = None,
         guidance_scale: Optional[float] = None,
         schedule: Optional[str] = None,
         num_steps: Optional[int] = None,
@@ -1031,6 +1059,7 @@ class HeunSampler:
             device=self.device,
             conditioning_prefix_full=conditioning_prefix_full,
             cond_prefix_mask=cond_prefix_mask,
+            protect_mask=protect_mask,
             conditioning_prefix=conditioning_prefix,
             cond_len_bits=cond_len_bits,
             is_cont_tokens=self.is_cont_tokens,
@@ -1541,6 +1570,7 @@ class DDIMSampler:
         cond_prefix_mask: Optional[torch.Tensor] = None,
         conditioning_prefix: Optional[torch.Tensor] = None,
         cond_len_bits: Optional[int] = None,
+        protect_mask: Optional[torch.Tensor] = None,
         guidance_scale: Optional[float] = None,
         schedule: Optional[str] = None,
         num_steps: Optional[int] = None,
@@ -1581,6 +1611,7 @@ class DDIMSampler:
             device=self.device,
             conditioning_prefix_full=conditioning_prefix_full,
             cond_prefix_mask=cond_prefix_mask,
+            protect_mask=protect_mask,
             conditioning_prefix=conditioning_prefix,
             cond_len_bits=cond_len_bits,
             is_cont_tokens=self.is_cont_tokens,
@@ -1991,6 +2022,7 @@ class EulerMaruyamaSampler:
         cond_prefix_mask: Optional[torch.Tensor] = None,
         conditioning_prefix: Optional[torch.Tensor] = None,
         cond_len_bits: Optional[int] = None,
+        protect_mask: Optional[torch.Tensor] = None,
         guidance_scale: Optional[float] = None,
         schedule: Optional[str] = None,
         num_steps: Optional[int] = None,
@@ -2033,6 +2065,7 @@ class EulerMaruyamaSampler:
             device=self.device,
             conditioning_prefix_full=conditioning_prefix_full,
             cond_prefix_mask=cond_prefix_mask,
+            protect_mask=protect_mask,
             conditioning_prefix=conditioning_prefix,
             cond_len_bits=cond_len_bits,
             is_cont_tokens=self.is_cont_tokens,

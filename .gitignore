@@ -71,3 +71,8 @@ generated_output.png
 # Crash dumps
 core
 core.*
+
+# MNIST-Sum port: local run artefacts
+smoke_logs/
+datasets/
+runs/

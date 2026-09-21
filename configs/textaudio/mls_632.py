@@ -83,7 +83,11 @@ def get_config():
     cfg.model.center_inputs = True
 
     cfg.model.patch_size = 18
-    cfg.model.use_segment_embed = True
+    # NOTE: this config used to set `cfg.model.use_segment_embed = True`. No
+    # segment embedding is implemented in this codebase, so nothing ever read
+    # the flag and CoBit-MLS trained without one. The line is removed rather
+    # than honoured: it described an architecture that never existed, and
+    # cfg.model validation now rejects unimplemented flags outright.
 
     cfg.model.embed_dim = 1152
     cfg.model.dim_ff = 4608
