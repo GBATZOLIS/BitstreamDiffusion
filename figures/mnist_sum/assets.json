@@ -1,0 +1,1568 @@
+{
+ "joint": [
+  {
+   "text": "five + nine + four + six = twenty-four",
+   "parsed": [
+    [
+     5,
+     9,
+     4,
+     6
+    ],
+    24
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "two + seven + eight + nine = twenty-six",
+   "parsed": [
+    [
+     2,
+     7,
+     8,
+     9
+    ],
+    26
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + seven + nine + three = nineteen",
+   "parsed": [
+    [
+     0,
+     7,
+     9,
+     3
+    ],
+    19
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "two + four + seven + zero = thirteen",
+   "parsed": [
+    [
+     2,
+     4,
+     7,
+     0
+    ],
+    13
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "three + five + four + five = seventeen",
+   "parsed": [
+    [
+     3,
+     5,
+     4,
+     5
+    ],
+    17
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "nine + seven + eight + three = twenty-seven",
+   "parsed": [
+    [
+     9,
+     7,
+     8,
+     3
+    ],
+    27
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + zero + six + seven = thirteen",
+   "parsed": [
+    [
+     0,
+     0,
+     6,
+     7
+    ],
+    13
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + three + seven + four = fourteen",
+   "parsed": [
+    [
+     0,
+     3,
+     7,
+     4
+    ],
+    14
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "four + three + six + five = eighteen",
+   "parsed": [
+    [
+     4,
+     3,
+     6,
+     5
+    ],
+    18
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + zero + six + two = eight",
+   "parsed": [
+    [
+     0,
+     0,
+     6,
+     2
+    ],
+    8
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "six + three + six + four = nineteen",
+   "parsed": [
+    [
+     6,
+     3,
+     6,
+     4
+    ],
+    19
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "eight + four + nine + seven = twenty-eight",
+   "parsed": [
+    [
+     8,
+     4,
+     9,
+     7
+    ],
+    28
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "seven + two + four + zero = thirteen",
+   "parsed": [
+    [
+     7,
+     2,
+     4,
+     0
+    ],
+    13
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "nine + three + two + six = twenty",
+   "parsed": [
+    [
+     9,
+     3,
+     2,
+     6
+    ],
+    20
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + zero + one + zero = one",
+   "parsed": [
+    [
+     0,
+     0,
+     1,
+     0
+    ],
+    1
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "one + nine + five + three = eighteen",
+   "parsed": [
+    [
+     1,
+     9,
+     5,
+     3
+    ],
+    18
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "two + nine + two + four = seventeen",
+   "parsed": [
+    [
+     2,
+     9,
+     2,
+     4
+    ],
+    17
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "five + nine + eight + eight = thirty",
+   "parsed": [
+    [
+     5,
+     9,
+     8,
+     8
+    ],
+    30
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "seven + eight + six + seven = twenty-eight",
+   "parsed": [
+    [
+     7,
+     8,
+     6,
+     7
+    ],
+    28
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "three + two + zero + three = eight",
+   "parsed": [
+    [
+     3,
+     2,
+     0,
+     3
+    ],
+    8
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "five + eight + eight + six = twenty-seven",
+   "parsed": [
+    [
+     5,
+     8,
+     8,
+     6
+    ],
+    27
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "five + five + zero + four = fourteen",
+   "parsed": [
+    [
+     5,
+     5,
+     0,
+     4
+    ],
+    14
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "two + nine + six + seven = twenty-four",
+   "parsed": [
+    [
+     2,
+     9,
+     6,
+     7
+    ],
+    24
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "five + zero + two + eight = fifteen",
+   "parsed": [
+    [
+     5,
+     0,
+     2,
+     8
+    ],
+    15
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "six + four + four + seven = twenty-one",
+   "parsed": [
+    [
+     6,
+     4,
+     4,
+     7
+    ],
+    21
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + five + five + seven = seventeen",
+   "parsed": [
+    [
+     0,
+     5,
+     5,
+     7
+    ],
+    17
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "eight + three + eight + eight = twenty-seven",
+   "parsed": [
+    [
+     8,
+     3,
+     8,
+     8
+    ],
+    27
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "one + nine + three + six = nineteen",
+   "parsed": [
+    [
+     1,
+     9,
+     3,
+     6
+    ],
+    19
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "six + six + five + zero = seventeen",
+   "parsed": [
+    [
+     6,
+     6,
+     5,
+     0
+    ],
+    17
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "zero + five + two + six = thirteen",
+   "parsed": [
+    [
+     0,
+     5,
+     2,
+     6
+    ],
+    13
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "nine + nine + nine + eight = thirty-five",
+   "parsed": [
+    [
+     9,
+     9,
+     9,
+     8
+    ],
+    35
+   ],
+   "wellformed": true
+  },
+  {
+   "text": "nine + five + eight + zero = twenty-two",
+   "parsed": [
+    [
+     9,
+     5,
+     8,
+     0
+    ],
+    22
+   ],
+   "wellformed": true
+  }
+ ],
+ "i2t_scored": [
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  },
+  {
+   "ok": true,
+   "wellformed": true
+  }
+ ],
+ "t2i_scored": [
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  },
+  {
+   "ok": true
+  }
+ ],
+ "joint_scored": [
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": false,
+   "wellformed": true,
+   "addends_match": false,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  },
+  {
+   "consistent": true,
+   "wellformed": true,
+   "addends_match": true,
+   "arithmetic_valid": true
+  }
+ ],
+ "t2i_pred_digits": [
+  [
+   6,
+   9,
+   0,
+   1
+  ],
+  [
+   8,
+   7,
+   4,
+   4
+  ],
+  [
+   0,
+   3,
+   1,
+   0
+  ],
+  [
+   3,
+   3,
+   5,
+   4
+  ],
+  [
+   7,
+   7,
+   3,
+   3
+  ],
+  [
+   5,
+   4,
+   4,
+   2
+  ],
+  [
+   3,
+   4,
+   5,
+   6
+  ],
+  [
+   0,
+   4,
+   9,
+   1
+  ],
+  [
+   9,
+   3,
+   9,
+   3
+  ],
+  [
+   7,
+   7,
+   2,
+   7
+  ],
+  [
+   7,
+   2,
+   9,
+   8
+  ],
+  [
+   3,
+   7,
+   1,
+   9
+  ],
+  [
+   0,
+   6,
+   2,
+   7
+  ],
+  [
+   7,
+   9,
+   1,
+   2
+  ],
+  [
+   1,
+   0,
+   3,
+   1
+  ],
+  [
+   4,
+   2,
+   6,
+   0
+  ],
+  [
+   8,
+   1,
+   7,
+   5
+  ],
+  [
+   5,
+   5,
+   4,
+   3
+  ],
+  [
+   8,
+   8,
+   1,
+   6
+  ],
+  [
+   4,
+   5,
+   7,
+   2
+  ],
+  [
+   4,
+   4,
+   1,
+   1
+  ],
+  [
+   6,
+   7,
+   3,
+   0
+  ],
+  [
+   8,
+   1,
+   6,
+   9
+  ],
+  [
+   8,
+   5,
+   6,
+   5
+  ],
+  [
+   1,
+   4,
+   8,
+   0
+  ],
+  [
+   3,
+   3,
+   4,
+   9
+  ],
+  [
+   6,
+   5,
+   5,
+   7
+  ],
+  [
+   3,
+   7,
+   5,
+   8
+  ],
+  [
+   7,
+   5,
+   4,
+   9
+  ],
+  [
+   8,
+   9,
+   9,
+   0
+  ],
+  [
+   7,
+   3,
+   9,
+   1
+  ],
+  [
+   7,
+   1,
+   2,
+   2
+  ]
+ ],
+ "joint_pred_digits": [
+  [
+   5,
+   9,
+   4,
+   6
+  ],
+  [
+   2,
+   7,
+   8,
+   0
+  ],
+  [
+   0,
+   7,
+   9,
+   3
+  ],
+  [
+   2,
+   4,
+   7,
+   0
+  ],
+  [
+   3,
+   5,
+   4,
+   5
+  ],
+  [
+   9,
+   7,
+   8,
+   3
+  ],
+  [
+   0,
+   0,
+   6,
+   7
+  ],
+  [
+   0,
+   3,
+   7,
+   4
+  ],
+  [
+   4,
+   3,
+   6,
+   5
+  ],
+  [
+   0,
+   0,
+   6,
+   2
+  ],
+  [
+   6,
+   3,
+   6,
+   4
+  ],
+  [
+   8,
+   4,
+   9,
+   7
+  ],
+  [
+   7,
+   2,
+   4,
+   0
+  ],
+  [
+   9,
+   3,
+   2,
+   6
+  ],
+  [
+   0,
+   0,
+   1,
+   0
+  ],
+  [
+   1,
+   9,
+   5,
+   3
+  ],
+  [
+   2,
+   9,
+   2,
+   4
+  ],
+  [
+   5,
+   9,
+   8,
+   8
+  ],
+  [
+   7,
+   8,
+   6,
+   7
+  ],
+  [
+   3,
+   2,
+   0,
+   3
+  ],
+  [
+   5,
+   8,
+   8,
+   6
+  ],
+  [
+   5,
+   5,
+   0,
+   4
+  ],
+  [
+   2,
+   9,
+   6,
+   7
+  ],
+  [
+   5,
+   0,
+   2,
+   8
+  ],
+  [
+   6,
+   4,
+   4,
+   7
+  ],
+  [
+   0,
+   5,
+   5,
+   7
+  ],
+  [
+   8,
+   3,
+   8,
+   8
+  ],
+  [
+   1,
+   9,
+   3,
+   6
+  ],
+  [
+   6,
+   6,
+   5,
+   0
+  ],
+  [
+   0,
+   5,
+   2,
+   6
+  ],
+  [
+   9,
+   9,
+   9,
+   8
+  ],
+  [
+   9,
+   5,
+   8,
+   0
+  ]
+ ],
+ "t2i_prompt": [
+  "six + nine + zero + one = sixteen",
+  "eight + seven + four + four = twenty-three",
+  "zero + three + one + zero = four",
+  "three + three + five + four = fifteen",
+  "seven + seven + three + three = twenty",
+  "five + four + four + two = fifteen",
+  "three + four + five + six = eighteen",
+  "zero + four + nine + one = fourteen",
+  "nine + three + nine + three = twenty-four",
+  "seven + seven + two + seven = twenty-three",
+  "seven + two + nine + eight = twenty-six",
+  "three + seven + one + nine = twenty",
+  "zero + six + two + seven = fifteen",
+  "seven + nine + one + two = nineteen",
+  "one + zero + three + one = five",
+  "four + two + six + zero = twelve",
+  "eight + one + seven + five = twenty-one",
+  "five + five + four + three = seventeen",
+  "eight + eight + one + six = twenty-three",
+  "four + five + seven + two = eighteen",
+  "four + four + one + one = ten",
+  "six + seven + three + zero = sixteen",
+  "eight + one + six + nine = twenty-four",
+  "eight + five + six + five = twenty-four",
+  "one + four + eight + zero = thirteen",
+  "three + three + four + nine = nineteen",
+  "six + five + five + seven = twenty-three",
+  "three + seven + five + eight = twenty-three",
+  "seven + five + four + nine = twenty-five",
+  "eight + nine + nine + zero = twenty-six",
+  "seven + three + nine + one = twenty",
+  "seven + one + two + two = twelve"
+ ],
+ "t2i_true_digits": [
+  [
+   6,
+   9,
+   0,
+   1
+  ],
+  [
+   8,
+   7,
+   4,
+   4
+  ],
+  [
+   0,
+   3,
+   1,
+   0
+  ],
+  [
+   3,
+   3,
+   5,
+   4
+  ],
+  [
+   7,
+   7,
+   3,
+   3
+  ],
+  [
+   5,
+   4,
+   4,
+   2
+  ],
+  [
+   3,
+   4,
+   5,
+   6
+  ],
+  [
+   0,
+   4,
+   9,
+   1
+  ],
+  [
+   9,
+   3,
+   9,
+   3
+  ],
+  [
+   7,
+   7,
+   2,
+   7
+  ],
+  [
+   7,
+   2,
+   9,
+   8
+  ],
+  [
+   3,
+   7,
+   1,
+   9
+  ],
+  [
+   0,
+   6,
+   2,
+   7
+  ],
+  [
+   7,
+   9,
+   1,
+   2
+  ],
+  [
+   1,
+   0,
+   3,
+   1
+  ],
+  [
+   4,
+   2,
+   6,
+   0
+  ],
+  [
+   8,
+   1,
+   7,
+   5
+  ],
+  [
+   5,
+   5,
+   4,
+   3
+  ],
+  [
+   8,
+   8,
+   1,
+   6
+  ],
+  [
+   4,
+   5,
+   7,
+   2
+  ],
+  [
+   4,
+   4,
+   1,
+   1
+  ],
+  [
+   6,
+   7,
+   3,
+   0
+  ],
+  [
+   8,
+   1,
+   6,
+   9
+  ],
+  [
+   8,
+   5,
+   6,
+   5
+  ],
+  [
+   1,
+   4,
+   8,
+   0
+  ],
+  [
+   3,
+   3,
+   4,
+   9
+  ],
+  [
+   6,
+   5,
+   5,
+   7
+  ],
+  [
+   3,
+   7,
+   5,
+   8
+  ],
+  [
+   7,
+   5,
+   4,
+   9
+  ],
+  [
+   8,
+   9,
+   9,
+   0
+  ],
+  [
+   7,
+   3,
+   9,
+   1
+  ],
+  [
+   7,
+   1,
+   2,
+   2
+  ]
+ ],
+ "i2t_pred": [
+  "six + nine + zero + one = sixteen",
+  "eight + seven + four + four = twenty-three",
+  "zero + three + one + zero = four",
+  "three + three + five + four = fifteen",
+  "seven + seven + three + three = twenty",
+  "five + four + four + two = fifteen",
+  "three + four + five + six = eighteen",
+  "zero + four + nine + one = fourteen",
+  "nine + three + nine + three = twenty-four",
+  "seven + seven + two + seven = twenty-three",
+  "seven + two + nine + eight = twenty-six",
+  "three + seven + one + nine = twenty",
+  "zero + six + two + seven = fifteen",
+  "seven + nine + one + two = nineteen",
+  "one + zero + three + one = five",
+  "four + two + six + zero = twelve",
+  "eight + one + seven + five = twenty-one",
+  "five + five + four + three = seventeen",
+  "eight + eight + one + six = twenty-three",
+  "four + five + seven + two = eighteen",
+  "four + four + one + one = ten",
+  "six + seven + three + zero = sixteen",
+  "eight + one + six + nine = twenty-four",
+  "eight + five + six + five = twenty-four",
+  "one + four + eight + zero = thirteen",
+  "three + three + four + nine = nineteen",
+  "six + five + five + seven = twenty-three",
+  "three + seven + five + eight = twenty-three",
+  "seven + five + four + nine = twenty-five",
+  "eight + nine + nine + zero = twenty-six",
+  "seven + three + nine + one = twenty",
+  "seven + one + two + two = twelve"
+ ],
+ "i2t_true": [
+  "six + nine + zero + one = sixteen",
+  "eight + seven + four + four = twenty-three",
+  "zero + three + one + zero = four",
+  "three + three + five + four = fifteen",
+  "seven + seven + three + three = twenty",
+  "five + four + four + two = fifteen",
+  "three + four + five + six = eighteen",
+  "zero + four + nine + one = fourteen",
+  "nine + three + nine + three = twenty-four",
+  "seven + seven + two + seven = twenty-three",
+  "seven + two + nine + eight = twenty-six",
+  "three + seven + one + nine = twenty",
+  "zero + six + two + seven = fifteen",
+  "seven + nine + one + two = nineteen",
+  "one + zero + three + one = five",
+  "four + two + six + zero = twelve",
+  "eight + one + seven + five = twenty-one",
+  "five + five + four + three = seventeen",
+  "eight + eight + one + six = twenty-three",
+  "four + five + seven + two = eighteen",
+  "four + four + one + one = ten",
+  "six + seven + three + zero = sixteen",
+  "eight + one + six + nine = twenty-four",
+  "eight + five + six + five = twenty-four",
+  "one + four + eight + zero = thirteen",
+  "three + three + four + nine = nineteen",
+  "six + five + five + seven = twenty-three",
+  "three + seven + five + eight = twenty-three",
+  "seven + five + four + nine = twenty-five",
+  "eight + nine + nine + zero = twenty-six",
+  "seven + three + nine + one = twenty",
+  "seven + one + two + two = twelve"
+ ],
+ "real_true": [
+  "six + nine + zero + one = sixteen",
+  "eight + seven + four + four = twenty-three",
+  "zero + three + one + zero = four",
+  "three + three + five + four = fifteen",
+  "seven + seven + three + three = twenty",
+  "five + four + four + two = fifteen",
+  "three + four + five + six = eighteen",
+  "zero + four + nine + one = fourteen",
+  "nine + three + nine + three = twenty-four",
+  "seven + seven + two + seven = twenty-three",
+  "seven + two + nine + eight = twenty-six",
+  "three + seven + one + nine = twenty",
+  "zero + six + two + seven = fifteen",
+  "seven + nine + one + two = nineteen",
+  "one + zero + three + one = five",
+  "four + two + six + zero = twelve",
+  "eight + one + seven + five = twenty-one",
+  "five + five + four + three = seventeen",
+  "eight + eight + one + six = twenty-three",
+  "four + five + seven + two = eighteen",
+  "four + four + one + one = ten",
+  "six + seven + three + zero = sixteen",
+  "eight + one + six + nine = twenty-four",
+  "eight + five + six + five = twenty-four",
+  "one + four + eight + zero = thirteen",
+  "three + three + four + nine = nineteen",
+  "six + five + five + seven = twenty-three",
+  "three + seven + five + eight = twenty-three",
+  "seven + five + four + nine = twenty-five",
+  "eight + nine + nine + zero = twenty-six",
+  "seven + three + nine + one = twenty",
+  "seven + one + two + two = twelve"
+ ],
+ "layout": {
+  "P": 28,
+  "text_pos": 3,
+  "image_pos": 112,
+  "markers": 6,
+  "positions": 121,
+  "bits": 3388
+ }
+}
