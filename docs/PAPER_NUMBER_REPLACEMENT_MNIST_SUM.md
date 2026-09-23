@@ -122,3 +122,39 @@ Measured directly from `data/mnist_sum_codec.resolve_layout(cfg)`:
 on csic47 (only `fig1_overview.py`, `fig2_joint.py`, `fig3_results.py`, `gen_assets.py`).
 The samples HAVE changed -- this is a different trained model -- so the figure does need
 regenerating from the new checkpoint. Send the script and it is a few minutes' work.
+
+---
+
+## 6. Provenance of the three numbers not in `results.json`
+
+Flagged during the paper edit: three figures used in §4.2 / the appendix do not
+appear in `results/mnist_sum_p28_500k_unified/results.json`. Each is sourced here.
+
+**63.0M parameters.** Primary source is the training log of the unified run,
+`train_logs/train_500k.log`:
+
+    Params    : total=63.04M (240.5MB), trainable=63.04M, frozen=0
+
+(The superseded run logged 63.33M. The difference is the input projection
+shrinking by 560 x 512 = 286,720 params when `n_fourier_local` goes 14 -> 4.)
+
+**"under 0.3%".** Arithmetic on the joint decomposition in `results.json`:
+cross-modal residual = 100 - 99.71 = 0.29%; arithmetic residual = 100 - 99.76 =
+0.24%. Both below 0.3%.
+
+**Train-pool classifier ceiling 99.78.** RE-MEASURED on this codebase
+2026-09-23 with the same cached classifier (`runs/mnist_sum_quadrant_cnn.pt`),
+n=4,096 per pool, via `evaluation.mnist_sum_classifier.measure_ceiling`:
+
+| composites built from | per quadrant | all four |
+|---|---|---|
+| MNIST **train** digits | 99.95 | **99.78** |
+| MNIST test digits (val) | 99.02 | 96.09 |
+| MNIST test digits (held-out) | 99.20 | 96.80 |
+
+All three reproduce the values in `docs/MNIST_SUM_RESULTS.md` §7.1 exactly. This
+matters because §7.1 documents the SUPERSEDED run: the ceiling is a calibration of
+the classifier, not of any diffusion model, and the classifier file is shared
+between the two arms -- so carrying 99.78 across is legitimate, and is now checked
+rather than assumed. The val/held-out figures also match `results.json`'s own
+`ceiling` block, which is an independent path to the same numbers.
