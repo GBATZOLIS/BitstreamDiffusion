@@ -18,18 +18,34 @@ STAGE="${MNIST_SUM_STAGE:-$REPO_ROOT/.mnist_sum_release}"
 WANT_FULL=0
 [[ "${1:-}" == "--full" ]] && WANT_FULL=1
 
-command -v gdown >/dev/null 2>&1 || { echo "gdown not found: python -m pip install gdown"; exit 1; }
+# Invoke gdown as a module: the console script is often absent even when the
+# package is installed (conda envs, --user installs, PATH not exported by the
+# job scheduler).
+PY_BIN="${PYTHON:-python}"
+command -v "$PY_BIN" >/dev/null 2>&1 || PY_BIN=python3
+"$PY_BIN" -c "import gdown" 2>/dev/null || {
+  echo "gdown not importable by '$PY_BIN'."
+  echo "  install:  $PY_BIN -m pip install gdown"
+  echo "  or point PYTHON= at the interpreter that has it, e.g."
+  echo "    PYTHON=~/miniconda3/envs/cobit/bin/python bash $0"
+  exit 1
+}
 
 echo "==> downloading release bundle (Google Drive folder $FOLDER_ID)"
 mkdir -p "$STAGE"
-gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID" -O "$STAGE"
+"$PY_BIN" -m gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID" -O "$STAGE"
 
 BUNDLE="$STAGE/mnist_sum_p28_12x512"
 [[ -d "$BUNDLE" ]] || BUNDLE="$STAGE"
 
 echo "==> verifying checksums"
 if [[ -f "$BUNDLE/SHA256SUMS" ]]; then
-  ( cd "$BUNDLE" && sha256sum -c --ignore-missing SHA256SUMS ) \
+  # --ignore-missing so a partial download (e.g. skipping the 132 MB training
+  # corpus) still verifies what it did fetch. grep -v drops any self-reference:
+  # SHA256SUMS cannot hash itself, and a stale self-entry would fail a good
+  # bundle -- which is a far worse failure than not checking that one file.
+  ( cd "$BUNDLE" && grep -v '[[:space:]]SHA256SUMS$' SHA256SUMS \
+      | sha256sum -c --ignore-missing - ) \
     || { echo "CHECKSUM MISMATCH -- do not use these files; re-download."; exit 1; }
 else
   echo "   ! SHA256SUMS not present in the download; skipping verification."
