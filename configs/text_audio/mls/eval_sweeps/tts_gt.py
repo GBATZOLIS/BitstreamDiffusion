@@ -70,7 +70,7 @@ def get_config():
     cfg.model.center_inputs = True
 
     cfg.model.patch_size = 18
-    cfg.model.use_segment_embed = True
+    # use_segment_embed removed: nothing reads it (see the note in configs/text_audio/mls/mls_train.py).
 
     cfg.model.embed_dim = 1152
     cfg.model.dim_ff = 4608
