@@ -1,9 +1,0 @@
-Model,Parameters,ASR-WER,ASR-CER,SpkSim,UTMOS,Type,URL
-ZipVoice,123M,1.51,-,0.657,4.05,Task Specific,https://arxiv.org/abs/2506.13053
-F5-TTS,336M,2.42,-,0.66,3.89,Task Specific,https://arxiv.org/abs/2410.06885
-VoxtLM-cold,125M,-,8.8,-,-,SLM,https://arxiv.org/abs/2309.07937v3
-VoxtLM,125M,-,9.4,-,-,SLM,https://arxiv.org/abs/2309.07937v3
-VoxtLM,350M,-,3.5,-,-,SLM,https://arxiv.org/abs/2309.07937v3
-VoxtLM,1.3B,-,3.9,-,-,SLM,https://arxiv.org/abs/2309.07937v3
-SpiritLM-Base,7B,-,6.7,-,-,SLM,https://arxiv.org/abs/2402.05755
-Moshi,7B,4.7,-,-,-,Dialogue System,https://arxiv.org/abs/2410.00037

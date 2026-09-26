@@ -7,7 +7,7 @@ from ml_collections import config_dict
 
 from .openwebtext import OpenWebTextDataset
 from .lm1b import LM1BDataset
-from .textaudio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
+from .text_audio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
 from .mnist_sum_bits import MNISTSumBitsDataset, get_dataloaders as _mnist_sum_get_dataloaders
 
 Split = Literal["train", "val", "test"]
@@ -68,10 +68,27 @@ def get_loader(
         ds = LM1BDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- Text+Audio ----------------
     if name in {'textaudio', 'libri'}:
-        if task == 'tts':
-            ds = TextAudioTTSDataset(config, split=split)
-        elif task == 'cont_taste':
+        if task in {'tts', 'tts_gt'}:
+            if task == 'tts_gt':
+                cache_path = getattr(config.data, 'tts_gt_cache_path', None)
+                meta_path = getattr(config.data, 'tts_gt_meta_path', None)
+                if not cache_path or not meta_path:
+                    raise ValueError(
+                        "task='tts_gt' requires cfg.data.tts_gt_cache_path and "
+                        "cfg.data.tts_gt_meta_path."
+                    )
+                ds = TextAudioTTSDataset(
+                    config,
+                    split=split,
+                    cache_path=cache_path,
+                    meta_path=meta_path,
+                    log_tag='tts_gt',
+                )
+            else:
+                ds = TextAudioTTSDataset(config, split=split)
+        elif task in {'cont', 'cont_taste'}:
             ds = TextAudioContinuationDataset(config, split=split)
         elif task == 'cont_flowslm':
             ds = TextAudioContinuationDataset(config, split=split, cache_name='flow_slm_cont_cache')
@@ -110,7 +127,7 @@ def get_dataloaders(
         return _lm1b_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {'textaudio', 'libri'}:
-        from .textaudio import get_dataloaders as _textaudio_get_dataloaders
+        from .text_audio import get_dataloaders as _textaudio_get_dataloaders
         return _textaudio_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {"MNISTSumBits", "mnist_sum_bits"}:

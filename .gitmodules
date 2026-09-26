@@ -1,3 +1,18 @@
 [submodule "Spark-TTS"]
 	path = Spark-TTS
 	url = https://github.com/SparkAudio/Spark-TTS.git
+[submodule "flow-slm"]
+	path = baselines/text_audio/flow-slm
+	url = https://github.com/jjery2243542/flow-slm.git
+[submodule "TASTE-SpokenLM"]
+	path = baselines/text_audio/TASTE-SpokenLM
+	url = https://github.com/mtkresearch/TASTE-SpokenLM.git
+[submodule "GPA"]
+	path = baselines/text_audio/GPA
+	url = https://github.com/AutoArk/GPA.git
+[submodule "llama-mimi"]
+	path = baselines/text_audio/llama-mimi
+	url = https://github.com/llm-jp/llama-mimi.git
+[submodule "spiritlm"]
+	path = baselines/text_audio/spiritlm
+	url = https://github.com/facebookresearch/spiritlm.git

@@ -48,7 +48,7 @@ except ImportError:
     evaluate_fid = None  # optional dep (pytorch_fid); only needed for --metrics fid
 from evaluation.evaluation_drivers.mauve import evaluate_mauve
 from evaluation.evaluation_drivers.generate_samples import evaluate_generate_samples
-from evaluation.evaluation_drivers.textaudio_generate import evaluate_textaudio_generate
+from evaluation.evaluation_drivers.text_audio.generate import evaluate_textaudio_generate
 
 
 # -----------------------------------------------------------------------------

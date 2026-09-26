@@ -23,7 +23,6 @@ except Exception:
     dist = None
 
 from utils.textaudio_utils import _fixed_mask, _safe_decode, TextAudioEvaluator, _write_wav, load_ref_audio_cache
-from utils.textaudio_report import build_textaudio_report
 from utils.model_utils import unwrap_model
 
 # -----------------------------------------------------------------------------
@@ -315,7 +314,11 @@ class TextAudioCallback:
     def _ensure_evaluator(self, r: _ResolvedTextAudio) -> None:
         if self._evaluator is not None:
             return
-        self._evaluator = TextAudioEvaluator(r.whisper_model, r.sample_rate, _dbg)
+        self._evaluator = TextAudioEvaluator(
+            whisper_model=r.whisper_model,
+            sr=r.sample_rate,
+            _dbg_func=_dbg,
+        )
 
     def _ensure_tts_ref_audio_cache(self, data_cfg) -> list:
         if self._tts_ref_audio_cache is not None:
@@ -757,11 +760,7 @@ class TextAudioCallback:
 
         with open(save_dir / 'data.json', 'w', encoding='utf-8') as f:
             json.dump(report_data, f, indent=4, ensure_ascii=False)
-        
-        html_path = build_textaudio_report(save_dir)
- 
         _dbg(f"Saved to {save_dir}")
-        _dbg(f"See report: {html_path}")
 
     @torch.compiler.disable
     @torch.no_grad()

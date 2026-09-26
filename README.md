@@ -187,8 +187,8 @@ BiCodec-global speaker representation and StableCodec speech tokens share one
 
 | Model | Config | Trunk | Speech budget | Training |
 |---|---|---|---|---|
-| CoBit-LibriTTS (134M) | [`configs/textaudio/libri_bits_edm_weight.py`](configs/textaudio/libri_bits_edm_weight.py) | 12×768 | 800 tokens | LibriTTS, 140K steps |
-| CoBit-MLS (633M) | [`configs/textaudio/mls_632.py`](configs/textaudio/mls_632.py) | 26×1152 | 500 tokens | LibriTTS + MLS-English, 1.2M steps |
+| CoBit-LibriTTS (134M) | [`configs/text_audio/libritts/libritts_train.py`](configs/text_audio/libritts/libritts_train.py) | 12×768 | 800 tokens | LibriTTS, 140K steps |
+| CoBit-MLS (633M) | [`configs/text_audio/mls/mls_train.py`](configs/text_audio/mls/mls_train.py) | 26×1152 | 500 tokens | LibriTTS + MLS-English, 1.2M steps |
 
 ### Setup
 
@@ -198,7 +198,7 @@ bash textaudio_install.sh        # required: the speech stack is not in requirem
 
 Download `audio+text/cobit-libritts/` or `audio+text/cobit-mls/` from the Drive
 folder and place each run directory under `runs/` at the name its config uses —
-`runs/textaudio_pilot/` for CoBit-LibriTTS and `runs/text_audio_joint/` for
+`runs/cobit_libritts/` for CoBit-LibriTTS and `runs/cobit_mls/` for
 CoBit-MLS — keeping `checkpoints/` and the four `entropy_*.pt` files together.
 The evaluation corpora (LibriSpeech-PC, SALMON) are under `audio+text/datasets/`.
 
@@ -206,7 +206,7 @@ The evaluation corpora (LibriSpeech-PC, SALMON) are under `audio+text/datasets/`
 
 ```bash
 python evaluation/run_eval.py \
-    --config configs/textaudio/mls_632.py \
+    --config configs/text_audio/mls/mls_train.py \
     --metrics textaudio_generate --compile
 ```
 
@@ -221,6 +221,9 @@ generations and sweeps behind Tables 2 and 6–23.
 > for each metric is being folded into this README; until then, the sweep
 > configurations recorded in the released `validation.zip` are the ground truth
 > for what was run.
+>
+> The per-model evaluation sweeps now live in `configs/text_audio/{libritts,mls}/eval_sweeps/`
+> (added in `f2b24d9`); the command above predates them and has not been checked against them.
 
 ---
 
