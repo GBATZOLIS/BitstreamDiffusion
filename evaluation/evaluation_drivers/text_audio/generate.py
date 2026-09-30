@@ -62,15 +62,18 @@ def _dbg(msg: str, *, all_ranks: bool = False) -> None:
 # -----------------------------------------------------------------------------
 # 'cont_taste', 'cont_salmon' are the two continuation-based
 # tasks. Specify 'cont' in the config for both.
-# 'tts_gt' refers to text-to-speech, using speaker tokens extracted from
-# the ground truth test waveforms instead of the held-out set.
+# 'tts_gt' refers to text-to-speech using speaker tokens extracted from the
+# ground-truth test waveforms. 'tts_vc' crosses shared text prompts with every
+# held-out speaker reference.
 CONT_SUBTASKS = ['cont_taste', 'cont_salmon']
-TASKS = ['joint', 'tts', 'tts_gt', 'stt'] + CONT_SUBTASKS
+TTS_TASKS = ('tts', 'tts_gt', 'tts_vc')
+TASKS = ['joint', *TTS_TASKS, 'stt'] + CONT_SUBTASKS
 DEFAULT_TASKS = ['joint', 'tts', 'stt', 'cont']
 TASK_IDS = {
     'joint': UNCONDITIONAL,
     'tts': TEXT_TO_SPEECH,
     'tts_gt': TEXT_TO_SPEECH,
+    'tts_vc': TEXT_TO_SPEECH,
     'stt': SPEECH_TO_TEXT,
     'cont_taste': SPEECH_CONTINUATION,
 }
@@ -240,6 +243,10 @@ def get_sharded_test_loaders(
         loaders['tts_gt'] = _sharded(
             get_loader(cfg, split='test', task='tts_gt', batch_size=batch_size).dataset
         )
+    if getattr(cfg.data, 'tts_vc_cache_path', None):
+        loaders['tts_vc'] = _sharded(
+            get_loader(cfg, split='test', task='tts_vc', batch_size=batch_size).dataset
+        )
 
     data_cfg = cfg.data
     orig_partition = getattr(data_cfg, 'partition', 'clean')
@@ -380,7 +387,7 @@ def _prepare_x_full(
     batch = batch.to(device=device, dtype=torch.float32, non_blocking=True)
     if task == 'stt':
         return batch
-    start = 0 if task in ('tts', 'tts_gt') else text_seq_len * bits_per_token
+    start = 0 if task in TTS_TASKS else text_seq_len * bits_per_token
     full = torch.zeros(batch.size(0), sequence_len, device=device, dtype=torch.float32)
     full[:, start:start + batch.size(1)] = batch
     return full
@@ -655,7 +662,7 @@ def generate_textaudio(cfg, model, device, rank: int, world_size: int) -> Option
     salmon_prompts = _load_salmon_prompts(salmon_ref_dir) if 'cont_salmon' in all_tasks else {}
 
     loaders: Dict[str, Any] = {}
-    if any(t in ('tts', 'tts_gt', 'cont_taste', 'stt') for t in all_tasks):
+    if any(t in (*TTS_TASKS, 'cont_taste', 'stt') for t in all_tasks):
         loaders = get_sharded_test_loaders(cfg, gen_batch_size, stt_partitions, rank, world_size)
 
     tts_ref_cache = (
@@ -818,7 +825,7 @@ def generate_textaudio(cfg, model, device, rank: int, world_size: int) -> Option
                 else:
                     loader = loaders[task]
                     local_gen = []
-                    local_ref = [] if task in ('tts', 'tts_gt') else None
+                    local_ref = [] if task in TTS_TASKS else None
                     for batch in loader:
                         x_full = _prepare_x_full(batch, task, sequence_len, bits_per_token, text_seq_len, device)
                         B = x_full.size(0)
@@ -830,10 +837,10 @@ def generate_textaudio(cfg, model, device, rank: int, world_size: int) -> Option
                                 sampler_cache,
                             )
                         local_gen.append(bits)
-                        if task in ('tts', 'tts_gt'):
+                        if task in TTS_TASKS:
                             local_ref.append((x_full > 0.5).to(torch.long))
                     gen_gathered = _gather_bits(local_gen, sequence_len, device)
-                    if task in ('tts', 'tts_gt'):
+                    if task in TTS_TASKS:
                         ref_gathered = _gather_bits(local_ref, sequence_len, device)
 
                 if not _rank0():
@@ -849,7 +856,7 @@ def generate_textaudio(cfg, model, device, rank: int, world_size: int) -> Option
                     speech_tok, gen_token_ids, text_seq_len, speaker_seq_len, speech_offset, speech_vocab_sz,
                 )
                 ref_texts = None
-                if task in ('tts', 'tts_gt'):
+                if task in TTS_TASKS:
                     ref_token_ids = _bits_to_token_ids(ref_gathered, bits_per_token)
                     ref_texts = _decode_texts(text_tok, ref_token_ids, text_seq_len, speech_offset, speech_vocab_sz)
 

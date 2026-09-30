@@ -391,8 +391,12 @@ class TextAudioEvaluator:
             self._speaker_model = model.to(device)
         return self._speaker_model
 
-    def _ensure_ref_speaker_embeddings(self, *, continuation: bool = False) -> torch.Tensor:
-        path = self._continuation_speaker_ref_path if continuation else self._speaker_ref_path
+    def _ensure_ref_speaker_embeddings(
+        self, *, continuation: bool = False, reference_path: str | None = None,
+    ) -> torch.Tensor:
+        path = reference_path or (
+            self._continuation_speaker_ref_path if continuation else self._speaker_ref_path
+        )
         key = 'embeddings' if continuation else f'{self.partition}_embeddings'
         cache_key = (str(path), key)
         if cache_key not in self._ref_speaker_embeddings:
@@ -406,10 +410,13 @@ class TextAudioEvaluator:
         return self._ref_speaker_embeddings[cache_key]
 
     def spksim(
-        self, gen_wavs, device, *, continuation: bool = False, reference_indices=None
+        self, gen_wavs, device, *, continuation: bool = False, reference_indices=None,
+        reference_path: str | None = None,
     ) -> float:
         model = self._ensure_speaker_model(device)
-        ref_embeddings = self._ensure_ref_speaker_embeddings(continuation=continuation)
+        ref_embeddings = self._ensure_ref_speaker_embeddings(
+            continuation=continuation, reference_path=reference_path,
+        )
         if reference_indices is not None:
             indices = torch.as_tensor(reference_indices, dtype=torch.long)
             if indices.ndim != 1 or len(indices) != len(gen_wavs):
@@ -661,6 +668,7 @@ class TextAudioEvaluator:
         self, task: str, gen_texts: List[str], ref_texts: List[str], gen_wavs, device,
         *, fsd_output_dir=None, fsd_sample_keys=None,
         fsd_sample_key_name: str = 'sample_keys', fsd_chunk_size: int = 32,
+        speaker_ref_path: str | None = None,
     ) -> Dict[str, float]:
         metrics = {}
         transcriptions = None
@@ -677,7 +685,9 @@ class TextAudioEvaluator:
             metrics['ASR-WER'] = self.word_error_rate(ref_texts, transcriptions)
             metrics['ASR-CER'] = self.character_error_rate(ref_texts, transcriptions)
             metrics['UTMOS'] = self.utmos_score(gen_wavs)
-            metrics['SpkSim'] = self.spksim(gen_wavs, device)
+            metrics['SpkSim'] = self.spksim(
+                gen_wavs, device, reference_path=speaker_ref_path,
+            )
         elif task == 'stt':
             metrics[f'{self.partition}-WER'] = self.word_error_rate(ref_texts, gen_texts)
             metrics[f'{self.partition}-CER'] = self.character_error_rate(ref_texts, gen_texts)
