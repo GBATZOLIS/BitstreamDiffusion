@@ -1,0 +1,38 @@
+{
+  "source": "CoBit COLM paper (cobit_colm_version.pdf), Figure 2 'LM1B GenPPL-entropy frontier', page 15",
+  "method": "Read from the figure's vector paths (polyline vertices and marker centres), mapped to data with the gridlines (x: 4.24..4.34, y: 50..110). The six reference markers reproduce Table 1 to two decimals, which validates the mapping.",
+  "note": "CoBit points are the plotted single sweep points; Table 1's 256-NFE rows are 10-seed means (deterministic 82.90 +/- 1.11 @ 4.30, stochastic 59.76 +/- 0.57 @ 4.31).",
+  "cobit_deterministic": [
+    {"nfe": 64,  "entropy": 4.3125, "genppl": 102.28},
+    {"nfe": 96,  "entropy": 4.3001, "genppl": 94.34},
+    {"nfe": 128, "entropy": 4.3014, "genppl": 91.51},
+    {"nfe": 192, "entropy": 4.2998, "genppl": 86.12},
+    {"nfe": 256, "entropy": 4.2984, "genppl": 84.80},
+    {"nfe": 384, "entropy": 4.3019, "genppl": 82.23},
+    {"nfe": 512, "entropy": 4.2947, "genppl": 80.39}
+  ],
+  "cobit_stochastic": [
+    {"nfe": 64,  "entropy": 4.3128, "genppl": 98.31},
+    {"nfe": 96,  "entropy": 4.3171, "genppl": 88.01},
+    {"nfe": 128, "entropy": 4.3170, "genppl": 76.59},
+    {"nfe": 192, "entropy": 4.3125, "genppl": 66.88},
+    {"nfe": 256, "entropy": 4.3127, "genppl": 58.95},
+    {"nfe": 384, "entropy": 4.2918, "genppl": 52.48},
+    {"nfe": 512, "entropy": 4.2744, "genppl": 46.67}
+  ],
+  "references": {
+    "real_data":     {"entropy": 4.31, "genppl": 53.06},
+    "ar_baseline":   {"entropy": 4.32, "genppl": 66.70, "label": "AR"},
+    "langflow_128":  {"entropy": 4.31, "genppl": 92.24, "label": "LangFlow (128)"},
+    "flm_1024":      {"entropy": 4.29, "genppl": 96.91, "label": "FLM (1024)"},
+    "duo":           {"entropy": 4.31, "genppl": 98.14, "label": "Duo"},
+    "mdlm":          {"entropy": 4.32, "genppl": 109.21, "label": "MDLM"}
+  },
+  "this_run": {
+    "source": "configs/lm1b/continuous/eval/dgc_schedule_ab.py, 2026-10-20, one NVIDIA A10G, bf16 autocast",
+    "settings": "released CoBit-S LM1B 1M checkpoint; NFE 256 (255 steps); gamma 0.200 full band; S_noise 1.003; ati_eta 0; seed 42 for every arm; 1024 samples; GPT-2 Large GenPPL; BERT unigram entropy",
+    "cobit_grid":   {"entropy": 4.2999, "genppl": 57.3151},
+    "dgc_grid":     {"entropy": 4.3408, "genppl": 60.5843},
+    "real_data":    {"entropy": 4.3435, "genppl": 53.1342}
+  }
+}
