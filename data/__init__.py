@@ -70,21 +70,21 @@ def get_loader(
 
     # ---------------- Text+Audio ----------------
     if name in {'textaudio', 'libri'}:
-        if task in {'tts', 'tts_gt'}:
-            if task == 'tts_gt':
-                cache_path = getattr(config.data, 'tts_gt_cache_path', None)
-                meta_path = getattr(config.data, 'tts_gt_meta_path', None)
+        if task in {'tts', 'tts_gt', 'tts_vc'}:
+            if task in {'tts_gt', 'tts_vc'}:
+                cache_path = getattr(config.data, f'{task}_cache_path', None)
+                meta_path = getattr(config.data, f'{task}_meta_path', None)
                 if not cache_path or not meta_path:
                     raise ValueError(
-                        "task='tts_gt' requires cfg.data.tts_gt_cache_path and "
-                        "cfg.data.tts_gt_meta_path."
+                        f"task={task!r} requires cfg.data.{task}_cache_path and "
+                        f"cfg.data.{task}_meta_path."
                     )
                 ds = TextAudioTTSDataset(
                     config,
                     split=split,
                     cache_path=cache_path,
                     meta_path=meta_path,
-                    log_tag='tts_gt',
+                    log_tag=task,
                 )
             else:
                 ds = TextAudioTTSDataset(config, split=split)

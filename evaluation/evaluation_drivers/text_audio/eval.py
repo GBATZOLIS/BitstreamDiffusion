@@ -141,6 +141,7 @@ def evaluate_textaudio_from_disk(
         textaudio_cfg, "e2v_statistics_path", "datasets/test_common/fsd_ref_stats_cont_common_e2v.npz"
     ))
     spksim_references = getattr(textaudio_cfg, "speaker_ref_path", None)
+    tts_vc_spksim_references = getattr(textaudio_cfg, "tts_vc_speaker_ref_path", None)
     continuation_spksim_references = getattr(textaudio_cfg, "continuation_speaker_ref_path", None)
     asr_num_workers = int(getattr(textaudio_cfg, "asr_num_workers", 4))
 
@@ -250,7 +251,7 @@ def evaluate_textaudio_from_disk(
                     _dbg(f"  stt/{tag}/{name} = {value:.4f}")
                 continue
 
-            # joint / tts / tts_gt / cont_taste
+            # joint / tts / tts_gt / tts_vc / cont_taste
             task_dir = run_dir / tag / task
             samples = _load_samples(task_dir)
             if not samples:
@@ -261,12 +262,12 @@ def evaluate_textaudio_from_disk(
             ref_texts = [s['ref_text'] for s in samples if 'ref_text' in s] or []
             gen_wavs = (
                 _load_wavs(run_dir, samples, task_dir, 'gen_wav')
-                if task in ('joint', 'tts', 'tts_gt', 'cont_taste') else []
+                if task in ('joint', 'tts', 'tts_gt', 'tts_vc', 'cont_taste') else []
             )
 
             _dbg(f"[{task}][{tag}] evaluating {len(samples)} samples ...")
             t0 = time.monotonic()
-            metric_task = 'tts' if task == 'tts_gt' else task
+            metric_task = 'tts' if task in ('tts_gt', 'tts_vc') else task
             if speaker and task == "joint":
                 assert speaker_evaluator is not None
                 metrics = speaker_evaluator.evaluate(
@@ -285,6 +286,7 @@ def evaluate_textaudio_from_disk(
                     ] if save_fsd_embeddings and metric_task == "cont_taste" else None,
                     fsd_sample_key_name="gen_wavs",
                     fsd_chunk_size=fsd_embedding_batch_size,
+                    speaker_ref_path=(tts_vc_spksim_references if task == 'tts_vc' else None),
                 )
             all_results[tag][task] = metrics
             _update_tag_results(run_dir, tag, task, metrics)
@@ -315,7 +317,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--tasks", nargs="+", default=None,
-        help="Only evaluate these tasks (e.g. joint tts tts_gt stt cont_taste cont_salmon), "
+        help="Only evaluate these tasks (e.g. joint tts tts_gt tts_vc stt cont_taste cont_salmon), "
              "intersected against whatever each selected tag's manifest.json actually has samples for.",
     )
     ap.add_argument(
