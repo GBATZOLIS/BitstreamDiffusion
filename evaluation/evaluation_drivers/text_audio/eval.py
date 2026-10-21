@@ -6,13 +6,10 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from utils.textaudio_utils import (
-    _read_wav,
-    TextAudioEvaluator,
-    SALMONEvaluator,
-    SALMON_JUDGE_PER_TASK,
-    JointSpeakerEvaluator,
-)
+from utils.text_audio.salmon_evaluator import SALMONEvaluator, SALMON_JUDGE_PER_TASK
+from utils.text_audio.speaker_evaluator import JointSpeakerEvaluator
+from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
+from utils.text_audio.utils import _read_wav
 
 # -----------------------------------------------------------------------------
 # Debug

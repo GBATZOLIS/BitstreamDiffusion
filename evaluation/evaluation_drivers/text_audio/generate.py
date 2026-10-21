@@ -22,12 +22,12 @@ from diffusion.continuous.processes import ContinuousForwardProcess
 from evaluation.distributed import barrier, gather_varlen_firstdim_to_rank0
 from evaluation.evaluation_drivers.utils import _resolve_eval_dirs
 from evaluation.utils import resolve_eval_amp, resolve_entropy_run_dir
-from utils.textaudio_utils import (
+from utils.text_audio.salmon_evaluator import SALMON_JUDGE_PER_TASK
+from utils.text_audio.utils import (
     _fixed_mask,
     _safe_decode,
     _write_wav,
     load_ref_audio_cache,
-    SALMON_JUDGE_PER_TASK,
     UNCONDITIONAL,
     TEXT_TO_SPEECH,
     SPEECH_TO_TEXT,

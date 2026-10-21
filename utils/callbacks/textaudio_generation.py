@@ -22,7 +22,8 @@ try:
 except Exception:
     dist = None
 
-from utils.textaudio_utils import _fixed_mask, _safe_decode, TextAudioEvaluator, _write_wav, load_ref_audio_cache
+from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
+from utils.text_audio.utils import _fixed_mask, _safe_decode, _write_wav, load_ref_audio_cache
 from utils.model_utils import unwrap_model
 
 # -----------------------------------------------------------------------------

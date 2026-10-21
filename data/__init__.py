@@ -5,10 +5,10 @@ from typing import Tuple, Literal
 from torch.utils.data import DataLoader
 from ml_collections import config_dict
 
-from .openwebtext import OpenWebTextDataset
-from .lm1b import LM1BDataset
-from .text_audio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
-from .mnist_sum_bits import MNISTSumBitsDataset, get_dataloaders as _mnist_sum_get_dataloaders
+from .text.openwebtext import OpenWebTextDataset
+from .text.lm1b import LM1BDataset
+from .text_audio.text_audio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
+from .mnist_sum.mnist_sum_bits import MNISTSumBitsDataset, get_dataloaders as _mnist_sum_get_dataloaders
 
 Split = Literal["train", "val", "test"]
 
@@ -119,15 +119,15 @@ def get_dataloaders(
     name = _norm_dataset_name(getattr(config.data, "dataset", None))
 
     if name in {"OpenWebText", "openwebtext", "owt", "OpenWebTextFLM", "openwebtext_flm"}:
-        from .openwebtext import get_dataloaders as _owt_get_dataloaders
+        from .text.openwebtext import get_dataloaders as _owt_get_dataloaders
         return _owt_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {"LM1B", "lm1b", "OneBillionWords", "one_billion_words"}:
-        from .lm1b import get_dataloaders as _lm1b_get_dataloaders
+        from .text.lm1b import get_dataloaders as _lm1b_get_dataloaders
         return _lm1b_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {'textaudio', 'libri'}:
-        from .text_audio import get_dataloaders as _textaudio_get_dataloaders
+        from .text_audio.text_audio import get_dataloaders as _textaudio_get_dataloaders
         return _textaudio_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {"MNISTSumBits", "mnist_sum_bits"}:

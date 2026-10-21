@@ -28,8 +28,8 @@ import torch
 
 from utils.callbacks.base import Callback
 
-from data import mnist_sum_codec as C
-from evaluation.mnist_sum import ms_sample, score_i2t, parse_equation
+from data.mnist_sum import mnist_sum_codec as C
+from evaluation.evaluation_drivers.mnist_sum.mnist_sum import ms_sample, score_i2t, parse_equation
 
 
 def _rank0() -> bool:

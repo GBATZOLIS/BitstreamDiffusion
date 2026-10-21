@@ -753,7 +753,7 @@ def _chunks(seq: list, size: int):
 def _geometry_suffix(
     text_seq_len: int, speaker_seq_len: int, speech_seq_len: int, always_suffix: bool = False,
 ) -> str:
-    # data/text_audio.py's _val_geometry_suffix/_test_geometry_suffix: applied to
+    # data/text_audio/text_audio.py's _val_geometry_suffix/_test_geometry_suffix: applied to
     # asr/tts filenames, never to continuation's (its dataset class never
     # geometry-suffixes). validation/ caches (always_suffix=False) leave the
     # original 1000-token geometry unsuffixed, matching legacy filenames;
@@ -962,7 +962,7 @@ def build_continuation_cache(
     (no text block). valid_ids should already reflect min_duration=trim_seconds
     (via load_valid_ids(..., min_duration=trim_seconds)) so every selected row
     has a real, non-padded prefix. Never geometry-suffixed (matches
-    data/text_audio.py's TextAudioContinuationDataset).
+    data/text_audio/text_audio.py's TextAudioContinuationDataset).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

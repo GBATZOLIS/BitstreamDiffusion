@@ -255,7 +255,7 @@ def prepare_validation(args) -> None:
 
 
 def _embed_speakers(dataset, ids, output, checkpoint, device, prefix_seconds=None):
-    from utils.speaker_verification import ECAPA_TDNN_SMALL
+    from utils.text_audio.speaker_verification import ECAPA_TDNN_SMALL
     index = {str(sid): i for i, sid in enumerate(dataset['id'])}
     model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wavlm_large', config_path=None)
     model.load_state_dict(torch.load(checkpoint, map_location='cpu')['model'], strict=False)
@@ -326,7 +326,7 @@ def _prepare_test_auxiliary(args, clean, other, tts_ids, cont_ids, other_ids, co
         _embed_speakers(clean, cont_ids, root / 'ref_speaker_embeddings_cont.npz',
                         args.speaker_checkpoint, device, CONT_SECONDS)
     if not args.skip_transcriptions:
-        from utils.textaudio_utils import TextAudioEvaluator
+        from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
         evaluator = TextAudioEvaluator(whisper_model=args.whisper_model, sr=MODEL_SR, _dbg_func=print)
         transcripts = evaluator.transcribe([x[:round(CONT_SECONDS * MODEL_SR)] for x in cont_refs], device)
         rows = [{'id': sid, 'transcription': text} for sid, text in zip(cont_ids, transcripts)]
@@ -424,7 +424,7 @@ def prepare_test_common(args) -> None:
 
 def _prepare_salmon(args, encoder: EvaluationEncoder) -> None:
     """Build all SALMON prompt caches and row-aligned judge embeddings."""
-    from utils.judge_models import JudgeModel
+    from utils.text_audio.judge_models import JudgeModel
 
     out_dir = Path(args.test_out) / 'salmon'
     out_dir.mkdir(parents=True, exist_ok=True)

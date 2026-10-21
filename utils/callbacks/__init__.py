@@ -14,7 +14,7 @@ from .external_ppl import ExternalPPLCallback
 from .mauve import MauveCallback
 from .visualization import VisualizationCallback
 # TextAudioCallback's module level reaches the full speech stack (jiwer /
-# fairseq / s3prl / NeMo -- see textaudio_install.sh). Guard it so that
+# fairseq / s3prl / NeMo -- see scripts/text_audio/textaudio_install.sh). Guard it so that
 # importing this package does not require the audio dependencies; an audio
 # config that actually asks for the callback still fails, loudly, on
 # construction rather than being silently skipped.

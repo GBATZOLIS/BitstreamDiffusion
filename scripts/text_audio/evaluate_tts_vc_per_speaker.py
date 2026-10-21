@@ -21,7 +21,8 @@ import numpy as np
 import torch
 
 from evaluation.utils import load_config
-from utils.textaudio_utils import TextAudioEvaluator, _read_wav
+from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
+from utils.text_audio.utils import _read_wav
 
 DEFAULT_CONFIG = ROOT / "configs/text_audio/mls/eval_sweeps/tts_vc.py"
 DEFAULT_RUN_DIR = ROOT / "runs/cobit_mls/evaluation/textaudio_eval/last"

@@ -17,12 +17,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from utils.textaudio_utils import (
-    CONT_TRIM_SECONDS,
-    SALMON_JUDGE_PER_TASK,
-    TextAudioEvaluator,
-    _trim_prefix_seconds,
-)
+from utils.text_audio.salmon_evaluator import SALMON_JUDGE_PER_TASK
+from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
+from utils.text_audio.utils import CONT_TRIM_SECONDS, _trim_prefix_seconds
 
 MIN_SPKSIM_SECONDS = 0.05
 DEFAULT_SALMON_DATASET = "SpeechPPL/SALMon_with_meta"
@@ -331,7 +328,7 @@ def main() -> None:
 
     if "cont_salmon" in tasks:
         from scripts.text_audio.cache_utils import decode_wav
-        from utils.judge_models import JudgeModel
+        from utils.text_audio.judge_models import JudgeModel
 
         judges: dict[str, Any] = {}
         salmon_metrics: dict[str, float] = {}

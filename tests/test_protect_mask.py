@@ -21,7 +21,7 @@ import pytest
 import torch
 
 REPO = Path(__file__).resolve().parents[1]
-CONFIG = REPO / "configs" / "multimodal" / "mnist_sum_p28_small.py"
+CONFIG = REPO / "configs" / "mnist_sum" / "mnist_sum_p28_small.py"
 
 
 def _load_cfg():
@@ -34,7 +34,7 @@ def _load_cfg():
 
 @pytest.fixture(scope="module")
 def setup():
-    from data import mnist_sum_codec as C
+    from data.mnist_sum import mnist_sum_codec as C
 
     cfg = _load_cfg()
     layout = C.resolve_layout(cfg)
@@ -54,7 +54,7 @@ def _build(cfg, ref, cond_b, protect, S, B):
 
 @pytest.mark.parametrize("task", ["i2t", "t2i", "joint"])
 def test_markers_survive_the_null_branch(setup, task):
-    from evaluation.mnist_sum import task_masks
+    from evaluation.evaluation_drivers.mnist_sum.mnist_sum import task_masks
 
     cfg, layout = setup
     dev = torch.device("cpu")
@@ -83,7 +83,7 @@ def test_markers_survive_the_null_branch(setup, task):
 
 def test_omitting_protect_mask_reproduces_the_bug(setup):
     """Pin the behaviour the carve-out fixes, so the test is known to bite."""
-    from evaluation.mnist_sum import task_masks
+    from evaluation.evaluation_drivers.mnist_sum.mnist_sum import task_masks
 
     cfg, layout = setup
     dev = torch.device("cpu")

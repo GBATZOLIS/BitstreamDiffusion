@@ -40,10 +40,10 @@ from utils.callbacks import (
 )
 # utils.textaudio_utils is imported lazily at its use site: its module level
 # pulls in the full speech stack (jiwer / fairseq / s3prl / NeMo, see
-# textaudio_install.sh), which made every non-audio config -- including
+# scripts/text_audio/textaudio_install.sh), which made every non-audio config -- including
 # MNIST-Sum -- unrunnable without installing it. UNCONDITIONAL is a plain
 # constant and is re-declared here so the dispatch below stays importable.
-from utils.mnist_sum_utils import _sample_regimes_and_cond_masks
+from utils.mnist_sum.utils import _sample_regimes_and_cond_masks
 
 UNCONDITIONAL = 0  # mirrors utils.textaudio_utils.UNCONDITIONAL
 
@@ -1550,7 +1550,7 @@ class Trainer:
         else:
             cond_text_audio = bool(getattr(cond_cfg, 'downstream', False))
             if cond_text_audio:
-                from utils.textaudio_utils import _sample_tasks_and_cond_masks
+                from utils.text_audio.utils import _sample_tasks_and_cond_masks
                 bpt = int(getattr(self.cfg.data, 'bits_per_token', 18)) if not is_cont_tokens else 1
                 task_ids, prefix_mask = _sample_tasks_and_cond_masks(
                     self.cfg, B, S, device=self.device, bits_per_token=bpt

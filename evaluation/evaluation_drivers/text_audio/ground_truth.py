@@ -19,7 +19,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from utils.textaudio_utils import CONT_TRIM_SECONDS, TextAudioEvaluator, _trim_prefix_seconds
+from utils.text_audio.textaudio_evaluator import TextAudioEvaluator
+from utils.text_audio.utils import CONT_TRIM_SECONDS, _trim_prefix_seconds
 
 
 def _read_json(path: Path) -> Any:
@@ -134,7 +135,7 @@ def _extract_heldout_embeddings(
     checkpoint: Path, device: torch.device,
 ):
     from scripts.text_audio.cache_utils import decode_wav
-    from utils.speaker_verification import ECAPA_TDNN_SMALL
+    from utils.text_audio.speaker_verification import ECAPA_TDNN_SMALL
 
     model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large", config_path=None)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu")["model"], strict=False)
