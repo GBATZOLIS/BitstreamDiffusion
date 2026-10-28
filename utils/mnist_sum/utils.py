@@ -34,6 +34,12 @@ from __future__ import annotations
 import torch
 from ml_collections import config_dict
 
+from utils.regimes import (
+    ConditioningPlan,
+    plan_from_masks,
+    register_regime_adapter,
+)
+
 # Regime ids. Unlike textaudio's task ids there is no UNCONDITIONAL regime:
 # the markers are clamped in every regime, so conditioning is never fully off.
 COND_TEXT = 0    # text -> image
@@ -71,9 +77,10 @@ def _layout_masks(cfg, S: int, device: torch.device):
     )
 
 
-def _sample_regimes_and_cond_masks(
-    cfg: config_dict.ConfigDict, B: int, S: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+@register_regime_adapter("mnist_sum")
+def sample_conditioning_plan(
+    cfg: config_dict.ConfigDict, B: int, S: int, device: torch.device, **_unused
+) -> ConditioningPlan:
     """
     Returns
     -------
@@ -102,7 +109,21 @@ def _sample_regimes_and_cond_masks(
     prefix_mask = marker_m.expand(B, S).clone()              # markers always clean
     prefix_mask = prefix_mask | (is_ct & text_m) | (is_ci & image_m)
     protect_mask = marker_m.expand(B, S).contiguous()
-    return regime_ids, prefix_mask, protect_mask
+    return plan_from_masks(
+        regime_ids,
+        prefix_mask,
+        protect_mask=protect_mask,
+        loss_mask=~prefix_mask,
+    )
+
+
+def _sample_regimes_and_cond_masks(
+    cfg: config_dict.ConfigDict, B: int, S: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compatibility wrapper for older callers and focused diagnostics."""
+
+    plan = sample_conditioning_plan(cfg, B, S, device)
+    return plan.regime_ids, plan.clamp_mask, plan.protect_mask
 
 
 def _fixed_regime_masks(

@@ -1,16 +1,17 @@
-# CoBit — Continuous Bitstream Diffusion
+# CoBit - Continuous Bitstream Diffusion
 
-Every modality is written as **bits**. One input projection, one transformer
-trunk, one bitwise prediction head and one binary score-matching objective serve
-all of them. Nothing in the denoiser is modality-specific — not an embedding,
-not a loss term, not a sampler.
+Every modality is written as **bits**. The same input projection, transformer trunk, bitwise prediction head and binary score-matching objective serves all of them The denoiser is modality agnostic, both at training and inference time. Modality-specific design is only needed for tokenization and the input sequence structure.
 
-This repository is the official implementation of two papers:
+**Check out our [demo](https://georgekontos14.github.io/MultimodalCobitDemo/)**
 
-| Paper | Scope | Guide |
+This repository contains official implementations of the following papers:
+
+| Paper | Scope | arXiv
 |---|---|---|
-| **Multimodal Co-Generation with Continuous Bitstream Diffusion** | image+text, speech+text, protein sequence+structure | **this README** |
-| CoBit: Language Modeling with Bitstream Diffusion — [arXiv:2605.07013](https://arxiv.org/abs/2605.07013) | LM1B, OpenWebText | [docs/README_language_modeling.md](docs/README_language_modeling.md) |
+| **Multimodal Co-Generation with Continuous Bitstram Diffusion** | image+text<br>audio+text<br>protein sequence+structure | [arXiv:2610.14349](https://arxiv.org/abs/2610.14349) | 
+| **CoBit: Language Modeling with Bitstream Diffusion** | LM1B, OpenWebText | [arXiv:2605.07013](https://arxiv.org/abs/2605.07013)
+
+Additional language modeling documentation: [docs/README_language_modeling.md](docs/README_language_modeling.md)
 
 A single checkpoint per modality pair performs **joint generation and every
 conditional direction it was trained on** — you change which bits are observed,
@@ -18,7 +19,9 @@ not which model you load.
 
 ---
 
-## Released checkpoints
+## Released Checkpoints
+
+**Multimodal checkpoints**
 
 | Experiment | Model | Params | Directions from one checkpoint | Status |
 |---|---|---|---|---|
@@ -46,6 +49,39 @@ must stay together:
 └── evaluation/             # the results.json behind the paper table
 ```
 
+**Language checkpoints**
+
+We release the trained checkpoints and the OWT second-stage code tokenizer on
+the [Hugging Face Hub](https://huggingface.co/gbatzolis/CoBit). All checkpoints
+are **EMA weights** — evaluate them with the default settings (the eval configs
+load them with `apply_ema=True`, which is a no-op on these baked weights).
+
+|Experiment | Model | Artifact | Params/Size | Destination
+|---|---|---|---|---|
+| LM1B | CoBit-S (1M) | `checkpoints/cobit_s_lm1b_1M_ema.pt` | 134M / 0.53 GB | `runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt` |
+| OWT | CoBit-S (750K) | `checkpoints/cobit_s_owt_750k_ema.pt` | 134M / 0.54 GB |  `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` |
+| OWT | CoBit-M (750K) | `checkpoints/cobit_m_owt_750k_ema.pt` | 462M / 1.85 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_medium_24x1024/checkpoints/step=000750000.pt` |
+| OWT | 16-bit code tokenizer | `tokenizer/…_base1024.json` + `.meta.json` | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/` |
+| --- | entropy-rate schedules | `entropy_tables/{lm1b,owt,owt_medium}/…` | ~7 KB ea. | `assets/entropy_tables/` (also ships in this repo) |
+
+#### One-shot download (places files in the exact expected paths)
+
+```bash
+python -m pip install "huggingface_hub>=0.23"
+
+# All three checkpoints + the OWT code tokenizer:
+python scripts/download_from_hf.py --repo-id gbatzolis/CoBit
+
+# …or just the CoBit-M (462M) model:
+python scripts/download_from_hf.py --repo-id gbatzolis/CoBit --models cobit_m
+```
+
+`scripts/download_from_hf.py` resolves each file from the Hub and copies it into
+the directory the training / evaluation configs read — no manual path edits. The
+entropy-rate tables already ship in this repository under
+[`assets/entropy_tables/`](assets/entropy_tables/), so they are not fetched by
+default (pass `--entropy-tables` to restore them if you deleted the in-repo copy).
+
 > ⚠️ **The entropy tables are not optional.** The entropy-rate noise schedule is
 > estimated online *per run*, and the sampler needs that run's profile. If they
 > are missing, this codebase **raises** rather than silently falling back to a
@@ -57,35 +93,51 @@ must stay together:
 ## Installation
 
 ```bash
-conda create -n cobit python=3.10 && conda activate cobit
+conda create -n bitstream python=3.11 -y
+conda activate bitstream
 
-# IMPORTANT: use `python -m pip ...`, not bare `pip ...`. On many clusters the
-# `pip` shim resolves to the system Python and installs into the wrong
-# interpreter. Confirm with: which python && python -m pip --version
+# Confirm that pip belongs to the activated interpreter.
+which python
+python -m pip --version
 
-# PyTorch — pick the build matching your CUDA toolkit
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-python -m pip install -r requirements.txt
+# Core training environment.
+./setup.sh train
 ```
 
-**Speech+text only.** The speech stack (StableCodec, Spark-TTS/BiCodec, jiwer,
-NeMo, fairseq/s3prl) is large and is *not* in `requirements.txt`:
+| Profile | Command | Additional dependencies |
+|---|---|---|
+| Core training | `./setup.sh train` | Base training stack |
+| Text-only | `./setup.sh text` | Gensim and text evaluation |
+| MNIST-Sum | `./setup.sh mnist-sum` | Released-artifact downloader |
+| Text-audio | `./setup.sh text-audio` | Torchaudio and audio evaluation stack |
+| Protein training | `./setup.sh protein` | Base training stack |
+| Protein evaluation | `./setup.sh protein-eval` | Folding and structural metrics; downloads evaluator models |
+| Development | `./setup.sh dev` | All profiles, pytest and Ruff |
+
+To target a different official PyTorch wheel index, set
+`PYTORCH_INDEX_URL` before running the script. For example:
 
 ```bash
-bash textaudio_install.sh
+PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 ./setup.sh train
 ```
 
-Everything else — image+text, protein, LM1B, OpenWebText — runs without it.
-Those imports are lazy, so a missing speech stack is only an error if you
-actually ask for a speech config.
+FlashAttention remains optional for the main model and can be installed after
+the selected profile when the CUDA compiler and GPU support it:
 
-**Optional.** FlashAttention 2 gives ~30% faster training and sampling; the code
-falls back to SDPA transparently if it is absent.
+```bash
+python -m pip install flash-attn --no-build-isolation
+```
+
+The additional speech-tokenizer and metric packages are installed separately
+when needed:
+
+```bash
+bash scripts/text_audio/textaudio_install.sh
+```
 
 ---
 
-## Experiment 1 — image+text (MNIST-Sum)
+## Multimodal Experiment 1 — image+text (MNIST-Sum)
 
 A controlled test of the multimodal interface with **no learned tokenizer on
 either side**, so there is no reconstruction floor and every direction has a
@@ -102,16 +154,18 @@ attention, no modality embedding.
 
 ```bash
 # 1. fetch checkpoint + entropy tables + classifier + evaluation corpus
-bash scripts/multimodal/fetch_mnist_sum_release.sh
+bash scripts/mnist_sum/fetch_mnist_sum_release.sh
 
 # 2. evaluate — all three directions, n=4,096 per direction per split
-python scripts/multimodal/eval_mnist_sum_offline.py \
-    --config configs/multimodal/mnist_sum_p28_small.py \
-    --ckpt   runs/multimodal/mnist_sum_p28_12x512/checkpoints/step=000500000.pt \
-    --out    results/mnist_sum_p28_500k --n 4096 --n_joint 4096
+python evaluation/run_eval.py \
+    --config configs/mnist_sum/mnist_sum_p28_small.py \
+    --metrics mnist_sum \
+    --mnist_sum_checkpoint runs/multimodal/mnist_sum_p28_12x512/checkpoints/step=000500000.pt \
+    --mnist_sum_out results/mnist_sum_p28_500k \
+    --mnist_sum_n 4096 --mnist_sum_n_joint 4096
 
 # 3. check every cell against the published intervals
-python scripts/multimodal/check_mnist_sum_results.py \
+python scripts/mnist_sum/check_mnist_sum_results.py \
     results/mnist_sum_p28_500k/results.json
 ```
 
@@ -157,11 +211,12 @@ match the generated image, and 99.76% whose arithmetic is valid.
 ```bash
 # Build the corpus (deterministic, seed 42; downloads MNIST) -- or pass --full
 # to the fetch script to download the exact 1M-example corpus we trained on.
-python scripts/multimodal/phase_50_mnist_sum_dataset.py --patch-size 28
+python scripts/mnist_sum/phase_50_mnist_sum_dataset.py \
+    --out datasets/mnist_sum_p28 --patch_size 28
 
 # 500,000 steps, global batch 512, ~282 ms/step
 torchrun --nproc_per_node=2 train.py \
-    --config configs/multimodal/mnist_sum_p28_small.py
+    --config configs/mnist_sum/mnist_sum_p28_small.py
 ```
 
 The run writes its own `entropy_{pdf,cdf,sigmas,edges}.pt` into the run
@@ -170,7 +225,7 @@ ones. Image→text accuracy is logged to TensorBoard under `mnist_sum/` at every
 50k steps and saturates by ~150k.
 
 The config is derived from the CC3M recipe by import-and-override
-([`configs/multimodal/_mnist_sum_base.py`](configs/multimodal/_mnist_sum_base.py)),
+([`configs/mnist_sum/_mnist_sum_base.py`](configs/mnist_sum/_mnist_sum_base.py)),
 so everything not listed in its `OVERRIDES` docstring is byte-identical to CC3M
 by construction. The only overrides are data geometry and trunk scale: **nothing
 in `cfg.model.*` is overridden**, so the backbone is the stock one, identical to
@@ -178,7 +233,7 @@ the speech models.
 
 ---
 
-## Experiment 2 — speech+text
+## Multimodal Experiment 2 — speech+text
 
 Two checkpoints, each performing text→speech, speech→text, speech continuation
 and joint co-generation from one set of weights. Text (o200k), a 32-token
@@ -193,7 +248,7 @@ BiCodec-global speaker representation and StableCodec speech tokens share one
 ### Setup
 
 ```bash
-bash textaudio_install.sh        # required: the speech stack is not in requirements.txt
+bash setup.sh text-audio
 ```
 
 Download `audio+text/cobit-libritts/` or `audio+text/cobit-mls/` from the Drive
@@ -206,7 +261,7 @@ The evaluation corpora (LibriSpeech-PC, SALMON) are under `audio+text/datasets/`
 
 ```bash
 python evaluation/run_eval.py \
-    --config configs/text_audio/mls/mls_train.py \
+    --config configs/text_audio/mls/eval_sweeps/512.py \
     --metrics textaudio_generate --compile
 ```
 
@@ -222,18 +277,78 @@ generations and sweeps behind Tables 2 and 6–23.
 > configurations recorded in the released `validation.zip` are the ground truth
 > for what was run.
 >
-> The per-model evaluation sweeps now live in `configs/text_audio/{libritts,mls}/eval_sweeps/`
-> (added in `f2b24d9`); the command above predates them and has not been checked against them.
+> The per-model evaluation sweeps live in
+> `configs/text_audio/{libritts,mls}/eval_sweeps/`. Select the sweep config whose
+> sampling budget and task set match the evaluation you want to run.
 
 ---
 
-## Experiment 3 — protein sequence+structure
+## Multimodal Experiment 3 — protein sequence+structure
 
-*To be added.* The 396M denoiser, its DPLM-2 LFQ tokenisation (5 amino-acid bits
-+ 13 structure bits per residue), the CATH / CAMEO evaluation sets and the
-ProteinMPNN/ESMFold self-consistency pipeline are described in Appendix D. The
-checkpoint will appear under `protein-structure+sequence/` in the same Drive
-folder, with the same run-directory layout.
+One checkpoint performs forward folding, inverse folding and joint sequence–
+structure co-generation. Each residue is represented by one 18-bit position:
+5 bits encode the amino-acid sequence token and 13 bits encode the frozen DPLM
+structure token.
+
+| Model | Config | Trunk | Maximum length | Training |
+|---|---|---|---|---|
+| CoBit-Protein (396M) | [`configs/proteins/proteins_400m.py`](configs/proteins/proteins_400m.py) | 20×1024 | 512 residues | Paired PDB/Swiss-Prot + UniRef50 replay, 300K steps |
+
+### Setup and data
+
+Install the training environment, download the frozen structure-tokenizer
+configuration and prepare the training datasets:
+
+```bash
+bash setup.sh protein
+python scripts/proteins/download_config.py
+python scripts/proteins/download_data.py train
+```
+
+The paired sequence–structure examples come from the
+[DPLM PDB/Swiss-Prot dataset](https://huggingface.co/datasets/airkingbd/pdb_swissprot).
+The preparation step also selects 400,000 replay sequences from
+[EvoDiff UniRef50](https://zenodo.org/records/6564798). Prepared data is written
+under `datasets/`.
+
+### Train
+
+The paper configuration uses FP32, an effective batch size of 512 and 300,000
+optimizer steps. The paper run used eight H100 GPUs:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py \
+    --config configs/proteins/proteins_400m.py
+```
+
+Checkpoints, entropy tables and logs are stored under `runs/proteins/paper/`.
+Rerunning the same command resumes from `checkpoints/last.pt` when it exists.
+
+### Evaluate
+
+Install the protein evaluation dependencies and frozen evaluator models, then
+prepare the CATH 4.3 and CAMEO 2022 evaluation data:
+
+```bash
+bash setup.sh protein-eval
+python scripts/proteins/download_data.py eval
+```
+
+Run entropy profiling, inverse folding, forward folding and co-generation from
+the unified evaluation entry point:
+
+```bash
+python evaluation/run_eval.py \
+    --config configs/proteins/proteins_400m.py \
+    --metrics proteins \
+    --protein_checkpoint runs/proteins/paper/checkpoints/best.pt
+```
+
+Entropy profiling runs first on the CATH validation split and writes the
+checkpoint-specific entropy tables beside the run. Inverse folding uses CATH
+test backbones, forward folding uses the CAMEO 2022 targets, and co-generation
+samples lengths 100, 200, 300, 400 and 500. The saved protocol uses 50 sampling
+grid points, guidance 5 for conditional tasks and entropy-windowed churn.
 
 ---
 
@@ -251,8 +366,12 @@ where a code goes.
 `M`: observed bits stay clean, `x_σ = x_0 + (1 − M) ⊙ σε`, and the loss is
 applied only to `(1 − M)`. Leaving all content bits unobserved trains joint
 generation; observing one modality trains generation of the other.
-Implementations: [`utils/mnist_sum_utils.py`](utils/mnist_sum_utils.py) and
-[`utils/textaudio_utils.py`](utils/textaudio_utils.py).
+The shared mask contract is in [`utils/regimes.py`](utils/regimes.py). The
+layout-specific implementations are
+[`utils/mnist_sum/utils.py`](utils/mnist_sum/utils.py),
+[`utils/text_audio/utils.py`](utils/text_audio/utils.py), and the protein state
+and dataset logic in [`data/protein_tasks.py`](data/protein_tasks.py) and
+[`data/protein_multimodal.py`](data/protein_multimodal.py).
 
 **Markers are always observed, and never dropped.** Structural marker positions
 stay clean in every regime, and — this is the subtle part — they must keep their
@@ -275,29 +394,51 @@ model come apart.
 
 ```
 BitstreamDiffusion/
-├── train.py                        # training entry point (DDP via torchrun)
-├── trainers/trainer.py             # training loop, partial-denoising regimes
-├── models/sdt.py                   # Sequence Diffusion Transformer
-├── diffusion/continuous/           # VE forward process, binary score loss, samplers
+├── setup.sh                         # Conda environment profiles
+├── train.py                         # shared training entry point (DDP via torchrun)
+├── trainers/
+│   ├── trainer.py                  # shared training loop
+│   └── multimodal_step.py          # protein sequence–structure training step
+├── models/
+│   ├── sdt.py                      # Sequence Diffusion Transformer
+│   └── protein_multimodal.py       # protein-specific embeddings and conditioning
+├── diffusion/continuous/           # VE process, binary score loss and samplers
 ├── data/
-│   ├── mnist_sum_{codec,bits}.py   # MNIST-Sum corpus and 7-bit text codec
-│   ├── mm_codec.py                 # shared 19-bit image+text codec (CC3M/CC12M)
-│   └── textaudio.py                # speech+text dataset
+│   ├── mnist_sum/                  # MNIST-Sum dataset and image+text codecs
+│   ├── text_audio/                 # speech+text dataset
+│   ├── protein_multimodal.py       # paired protein dataset
+│   └── protein_tasks.py            # protein regimes and modality masks
 ├── configs/
-│   ├── multimodal/                 # MNIST-Sum, CC3M
-│   ├── textaudio/                  # CoBit-LibriTTS, CoBit-MLS
-│   ├── lm1b/  owt/                 # the language-modeling paper
+│   ├── mnist_sum/                  # MNIST-Sum and CC3M
+│   ├── text_audio/                 # CoBit-LibriTTS and CoBit-MLS
+│   ├── proteins/                   # protein sequence+structure
+│   └── text/{lm1b,owt}/            # language modeling
 ├── evaluation/
-│   ├── mnist_sum{,_classifier}.py  # exact scorers + quadrant CNN
-│   └── run_eval.py                 # unified evaluation entry point
-├── scripts/multimodal/             # MNIST-Sum corpus builder, harness, fetch/check
-├── utils/schedule_controller.py    # online entropy-rate estimation
-└── docs/                           # per-experiment reports and the LM guide
+│   ├── run_eval.py                 # unified evaluation entry point
+│   └── evaluation_drivers/         # MNIST-Sum, text-audio and protein drivers
+├── scripts/{mnist_sum,text_audio,proteins,text}/
+│                                      # preparation and experiment utilities
+├── utils/
+│   ├── regimes.py                  # shared conditioning-plan interface
+│   ├── callbacks/                  # training-time evaluation and generation
+│   └── {mnist_sum,text_audio,proteins}/
+│                                      # experiment-specific utilities
+├── assets/                         # fixed codecs and evaluation assets
+└── docs/                           # experiment reports and language-modeling guide
 ```
 
 ---
 
 ## Citation
+
+```bibtex
+@article{multimodalcobit2026,
+  title   = {Multimodal Co-Generation With Continuous Bitstream Diffusion},
+  author  = {Batzolis, Georgios and Kontos, Georgios and Trentini, Bruno and Chatterjee, Pranam and Livne, Micha and Girolami, Mark and Ambrogioni, Luca},
+  journal = {arXiv preprint arXiv:2610.14349},
+  year    = {2026}
+}
+```
 
 ```bibtex
 @article{cobit2026,
@@ -308,4 +449,3 @@ BitstreamDiffusion/
 }
 ```
 
-The multimodal paper is under review; the citation will be added on acceptance.

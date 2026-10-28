@@ -6,6 +6,12 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
+from utils.regimes import (
+    ConditioningPlan,
+    plan_from_masks,
+    register_regime_adapter,
+)
+
 # Task IDs
 UNCONDITIONAL = 0
 TEXT_TO_SPEECH = 1
@@ -29,9 +35,10 @@ def _trim_prefix_seconds(wav, seconds: float, sr: int):
     trimmed = arr[skip:]
     return trimmed if trimmed.size > 0 else None
 
-def _sample_tasks_and_cond_masks(
+@register_regime_adapter("text_audio")
+def sample_conditioning_plan(
     cfg: config_dict.ConfigDict, B: int, S: int, device: torch.device, bits_per_token: int = 18
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> ConditioningPlan:
     text_len = int(getattr(cfg.data, 'text_seq_len', 168))
     speaker_len = int(getattr(cfg.data, 'speaker_seq_len', 32))
 
@@ -64,7 +71,16 @@ def _sample_tasks_and_cond_masks(
         else: # Continuation
             mask[sel, text_end*bits_per_token:cont_end*bits_per_token] = True
     
-    return task_ids, mask
+    return plan_from_masks(task_ids, mask, loss_mask=~mask)
+
+
+def _sample_tasks_and_cond_masks(
+    cfg: config_dict.ConfigDict, B: int, S: int, device: torch.device, bits_per_token: int = 18
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compatibility wrapper used by existing evaluation utilities."""
+
+    plan = sample_conditioning_plan(cfg, B, S, device, bits_per_token)
+    return plan.regime_ids, plan.clamp_mask
 
 def _fixed_mask(
     cfg: config_dict.ConfigDict, B: int, S: int, task: int, device: torch.device, bits_per_token: int = 18

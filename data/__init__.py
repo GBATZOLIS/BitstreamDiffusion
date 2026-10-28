@@ -101,9 +101,21 @@ def get_loader(
         ds = MNISTSumBitsDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- Protein sequence+structure bitstream ----------------
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+
+        return get_multimodal_loader(
+            config,
+            split=split,
+            batch_size=batch,
+            shuffle=shuffle,
+            seed=seed,
+        )
+
     raise NotImplementedError(
         f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
-        "'Textaudio', 'MNISTSumBits'."
+        "'Textaudio', 'MNISTSumBits', 'ProteinMultimodalLFQ'."
     )
 
 
@@ -133,7 +145,22 @@ def get_dataloaders(
     if name in {"MNISTSumBits", "mnist_sum_bits"}:
         return _mnist_sum_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+
+        batch = int(batch_size or config.train.batch_size)
+        train = get_multimodal_loader(
+            config, split="train", batch_size=batch, shuffle=True, seed=seed
+        )
+        val = get_multimodal_loader(
+            config, split="val", batch_size=batch, shuffle=False, seed=seed
+        )
+        test = get_multimodal_loader(
+            config, split="test", batch_size=batch, shuffle=False, seed=seed
+        )
+        return train, val, test
+
     raise NotImplementedError(
         f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
-        "'Textaudio', 'MNISTSumBits'."
+        "'Textaudio', 'MNISTSumBits', 'ProteinMultimodalLFQ'."
     )

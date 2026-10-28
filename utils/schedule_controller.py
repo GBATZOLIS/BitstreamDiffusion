@@ -24,6 +24,28 @@ def _generalized_regularizer(sigmas: torch.Tensor, c: float, n: float) -> torch.
     return x / (1.0 + x)
 
 
+def regularized_entropy_weights(
+    mean_rate: torch.Tensor,
+    sigmas: torch.Tensor,
+    *,
+    c: float,
+    n: float,
+    power: float,
+) -> torch.Tensor:
+    """Return the unnormalised weights used by the CoBit entropy schedule."""
+    mean_rate = mean_rate.float().clamp_min(0.0)
+    sigmas = sigmas.to(device=mean_rate.device, dtype=torch.float32)
+    rate_term = (
+        mean_rate.pow(float(power))
+        if float(power) != 0.0
+        else torch.ones_like(mean_rate)
+    )
+    return (
+        _generalized_regularizer(sigmas, c=c, n=n).to(torch.float32)
+        * rate_term
+    )
+
+
 class EntropyScheduleController:
     """
     Entropy-rate based sigma scheduling for continuous diffusion.
@@ -506,13 +528,13 @@ class EntropyScheduleController:
         mids = mid_log.exp().clamp(min=1e-12)
         edges_sigma = edges_log.exp().clamp(min=1e-12)
 
-        # Regularizer g(sigma_mid)
-        reg = _generalized_regularizer(mids, c=c, n=n).to(torch.float32)
-
-        # Rate exponent
-        rate_term = mean_rate.pow(power) if power != 0.0 else torch.ones_like(mean_rate)
-
-        unnormalized = reg * rate_term
+        unnormalized = regularized_entropy_weights(
+            mean_rate,
+            mids,
+            c=c,
+            n=n,
+            power=power,
+        )
 
         # Handle degeneracies / NaNs / all-zero
         good = torch.isfinite(unnormalized).all() and float(unnormalized.sum().item()) > 0.0

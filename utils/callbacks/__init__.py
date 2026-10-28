@@ -11,7 +11,17 @@ from .entropy_schedule_plot import EntropySchedulePlotCallback
 from .offline_entropy_profile import OfflineEntropyProfileCallback
 from .vlb_bound import VLBBoundCallback
 from .external_ppl import ExternalPPLCallback
-from .mauve import MauveCallback
+try:
+    from .mauve import MauveCallback
+except ImportError as _mauve_import_error:  # pragma: no cover - optional extra
+    class MauveCallback:  # type: ignore[no-redef]
+        """Placeholder used when the optional MAUVE dependency is absent."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "MauveCallback requires the eval extra. Install it with "
+                "`uv sync --extra eval`."
+            ) from _mauve_import_error
 from .visualization import VisualizationCallback
 # TextAudioCallback's module level reaches the full speech stack (jiwer /
 # fairseq / s3prl / NeMo -- see scripts/text_audio/textaudio_install.sh). Guard it so that

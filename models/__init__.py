@@ -28,7 +28,10 @@ RECOGNISED_MODEL_KEYS = frozenset({
     "max_seq_len", "name", "n_blocks", "n_fourier_global", "n_fourier_local",
     "n_heads", "out_dim", "patch_size", "rope_base", "rpb_max_distance",
     "scale_by_sigma", "self_condition", "use_adaln", "use_flash_attn",
-    "use_rope_trunk", "use_swiglu",
+    "use_rope_trunk", "use_swiglu", "protein", "asymmetric_modality_time",
+    "final_norm", "independent_modality_noise", "lambda_seq", "lambda_struct",
+    "length_conditioning", "qk_norm", "residue_pos_features",
+    "residue_pos_fraction",
 })
 
 # Vestigial keys: carried by the published OWT / LM1B configs, read by nothing.

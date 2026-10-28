@@ -53,6 +53,7 @@ def get_config():
     # ------------------------------------------------------------------
     cfg.cond = config_dict.ConfigDict()
     cfg.cond.enabled = True
+    cfg.cond.regime_adapter = "text_audio"
     cfg.cond.continuation_prefix = 75
     cfg.cond.unconditional_rate = 0.25
     cfg.cond.texttospeech_rate = 0.25
@@ -61,7 +62,7 @@ def get_config():
     cfg.cond.downstream = True
 
     # ------------------------------------------------------------------
-    # Model -- LARGE 26 x 1152 (~633M), patch_size 18, + segment embedding
+    # Model -- LARGE 26 x 1152 (~633M), patch_size 18
     # ------------------------------------------------------------------
     cfg.model = config_dict.ConfigDict()
     cfg.model.name = "sdt"
@@ -70,7 +71,6 @@ def get_config():
     cfg.model.center_inputs = True
 
     cfg.model.patch_size = 18
-    # use_segment_embed removed: nothing reads it (see the note in configs/text_audio/mls/mls_train.py).
 
     cfg.model.embed_dim = 1152
     cfg.model.dim_ff = 4608

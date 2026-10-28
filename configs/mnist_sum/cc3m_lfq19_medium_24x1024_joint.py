@@ -71,6 +71,7 @@ def get_config():
     # ------------------------------------------------------------------
     cfg.cond = config_dict.ConfigDict()
     cfg.cond.enabled = True
+    cfg.cond.regime_adapter = "mnist_sum"
     cfg.cond.cond_mode = "multimodal_mask"
     cfg.cond.noise_prefix = False        # clamp the conditioned modality + markers clean
     cfg.cond.loss_on_suffix_only = True  # loss only on the noised (target) modality

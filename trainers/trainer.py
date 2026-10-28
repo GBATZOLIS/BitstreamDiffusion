@@ -8,6 +8,7 @@ import math
 import random
 import json
 import shutil
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -38,14 +39,7 @@ from utils.callbacks import (
     VisualizationCallback,
     TextAudioCallback
 )
-# utils.textaudio_utils is imported lazily at its use site: its module level
-# pulls in the full speech stack (jiwer / fairseq / s3prl / NeMo, see
-# scripts/text_audio/textaudio_install.sh), which made every non-audio config -- including
-# MNIST-Sum -- unrunnable without installing it. UNCONDITIONAL is a plain
-# constant and is re-declared here so the dispatch below stays importable.
-from utils.mnist_sum.utils import _sample_regimes_and_cond_masks
-
-UNCONDITIONAL = 0  # mirrors utils.textaudio_utils.UNCONDITIONAL
+from utils.regimes import sample_conditioning_plan
 
 
 from utils.schedule_controller import EntropyScheduleController
@@ -890,24 +884,99 @@ class Trainer:
 
 
         # ── data ────────────────────────────────────────────────────────────
-        raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
+        self.is_protein = bool(getattr(cfg.model, "protein", False))
+        self.protein_mixture_schedule = None
+        self.protein_replay_loader = None
+        self._protein_replay_iter = None
+        self._protein_accum_counter = 0
 
-        if self.ddp_active:
-            assert cfg.train.batch_size % self.world_size == 0, (
-                f"Global batch_size ({cfg.train.batch_size}) must be divisible by world_size "
-                f"({self.world_size}) for fixed-shape DDP training."
+        if self.is_protein:
+            from data.protein_multimodal import get_multimodal_loader
+
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be "
+                    f"divisible by world_size ({self.world_size})."
+                )
+                local_batch_size = cfg.train.batch_size // self.world_size
+            else:
+                local_batch_size = int(cfg.train.batch_size)
+
+            protein_seed = int(getattr(cfg.train, "seed", 42))
+            self.train_loader = get_multimodal_loader(
+                cfg,
+                split="train",
+                batch_size=local_batch_size,
+                shuffle=True,
+                seed=protein_seed,
+            )
+            self.val_loader = get_multimodal_loader(
+                cfg,
+                split="val",
+                batch_size=local_batch_size,
+                shuffle=False,
+                seed=protein_seed,
             )
 
-        self.train_loader = _make_split_loader(
-            raw_train_loader.dataset, cfg,
-            shuffle=True, drop_last=True,
-            ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
-        )
-        self.val_loader = _make_split_loader(
-            raw_val_loader.dataset, cfg,
-            shuffle=False, drop_last=True,
-            ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
-        )
+            replay_root = str(
+                getattr(cfg.data, "sequence_replay_root", "") or ""
+            )
+            replay_fraction = float(
+                getattr(cfg.data, "sequence_replay_fraction", 0.0) or 0.0
+            )
+            if replay_fraction > 0.0:
+                if not replay_root or not (Path(replay_root) / "manifest.json").exists():
+                    raise RuntimeError(
+                        "Protein sequence replay is enabled but no prepared "
+                        f"manifest exists under {replay_root!r}."
+                    )
+                original_shard = cfg.data.shard_dir
+                original_source_weights = getattr(cfg.data, "source_weights", None)
+                original_task_weights = getattr(cfg.data, "task_weights", None)
+                cfg.data.shard_dir = replay_root
+                cfg.data.source_weights = None
+                cfg.data.task_weights = {"sequence_marginal": 1.0}
+                try:
+                    self.protein_replay_loader = get_multimodal_loader(
+                        cfg,
+                        split="train",
+                        batch_size=local_batch_size,
+                        shuffle=True,
+                        seed=protein_seed + 101,
+                    )
+                finally:
+                    cfg.data.shard_dir = original_shard
+                    cfg.data.source_weights = original_source_weights
+                    cfg.data.task_weights = original_task_weights
+
+            if bool(getattr(cfg.data, "use_mixture_schedule", False)):
+                from data.protein_tasks import TaskMixtureSchedule
+
+                self.protein_mixture_schedule = TaskMixtureSchedule()
+                if self.protein_replay_loader is None:
+                    raise RuntimeError(
+                        "The protein mixture schedule includes sequence replay, "
+                        "but no replay loader was constructed."
+                    )
+        else:
+            raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
+
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be divisible by world_size "
+                    f"({self.world_size}) for fixed-shape DDP training."
+                )
+
+            self.train_loader = _make_split_loader(
+                raw_train_loader.dataset, cfg,
+                shuffle=True, drop_last=True,
+                ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
+            )
+            self.val_loader = _make_split_loader(
+                raw_val_loader.dataset, cfg,
+                shuffle=False, drop_last=True,
+                ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
+            )
 
         # ── model ───────────────────────────────────────────────────────────
         base = create_model(cfg).to(self.device)
@@ -930,7 +999,7 @@ class Trainer:
                 base,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
-                find_unused_parameters=False,
+                find_unused_parameters=self.is_protein,
                 bucket_cap_mb=200, # Increase multi-node capacity
             )
 
@@ -951,6 +1020,16 @@ class Trainer:
                 print("[torch.compile] not available in this PyTorch; using eager mode.")
 
         self.model = base
+
+        # Keep model initialization identical across ranks, then give the
+        # protein task/noise stream a distinct seed on each worker.
+        if self.is_protein:
+            stochastic_seed = int(getattr(cfg.train, "seed", 42)) + self.rank
+            random.seed(stochastic_seed)
+            np.random.seed(stochastic_seed % (2**32 - 1))
+            torch.manual_seed(stochastic_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(stochastic_seed)
 
         # ── opt / ema / amp ────────────────────────────────────────────────
         self.ema = EMA(self.model, decay=cfg.train.ema_decay)
@@ -974,6 +1053,11 @@ class Trainer:
         )
         self.scaler = GradScaler(enabled=self.use_scaler)
         self.grad_clip = float(getattr(cfg.optim, "grad_clip", 1.0))
+        self.protein_grad_accum_steps = (
+            max(1, int(getattr(cfg.train, "grad_accum_steps", 1) or 1))
+            if self.is_protein
+            else 1
+        )
 
         # ──────────────────────────────────────────────────────────────────
         # Entropy modes: none vs online(adaptive) vs offline
@@ -1081,7 +1165,7 @@ class Trainer:
                 self.callbacks.append(OfflineEntropyProfileCallback(cfg))
 
             # SigmaDataEstimator / plotting are master-only (no collectives, pure logging)
-            if self.is_master:
+            if self.is_master and not self.is_protein:
                 self.callbacks.append(SigmaDataEstimator(num_batches=10))
                 self.callbacks.append(
                     EntropySchedulePlotCallback(
@@ -1530,54 +1614,53 @@ class Trainer:
         # ------------------------------------------------------------------
         cond_cfg = getattr(self.cfg, "cond", None)
         cond_enabled_cfg = (cond_cfg is not None) and bool(getattr(cond_cfg, "enabled", False))
-        cond_mode = str(getattr(cond_cfg, "cond_mode", "")).lower() if cond_cfg is not None else ""
+        regime_adapter = (
+            str(getattr(cond_cfg, "regime_adapter", "")).lower()
+            if cond_cfg is not None else ""
+        )
 
         # protect_mask: positions held at their TRUE values even when CFG drops
-        # the conditioning modality (the markers, under multimodal_mask).
-        # None for the legacy and text+audio modes, which have no such positions.
+        # the conditioning modality. None for layouts with no such positions.
         protect_mask = None
-        cond_text_audio = False
+        regime_loss_mask = None
         if not cond_enabled_cfg:
             cond_enabled = False
             prefix_mask = None
             cL_pos = None
-        elif cond_mode == "multimodal_mask":
+        elif regime_adapter:
             cL_pos = None
-            _, prefix_mask, protect_mask = _sample_regimes_and_cond_masks(
+            bpt = (
+                int(getattr(self.cfg.data, "bits_per_token", 18))
+                if not is_cont_tokens else 1
+            )
+            plan = sample_conditioning_plan(
+                regime_adapter,
+                self.cfg,
+                B,
+                S,
+                device=self.device,
+                bits_per_token=bpt,
+            )
+            prefix_mask = plan.clamp_mask
+            regime_loss_mask = plan.loss_mask
+            protect_mask = plan.protect_mask if bool(plan.protect_mask.any()) else None
+            cond_enabled = bool(prefix_mask.any())
+        else:
+            cL_pos = _sample_cond_len_positions_per_example_continuous(
                 self.cfg, B, S, device=self.device
             )
-            cond_enabled = True
-        else:
-            cond_text_audio = bool(getattr(cond_cfg, 'downstream', False))
-            if cond_text_audio:
-                from utils.text_audio.utils import _sample_tasks_and_cond_masks
-                bpt = int(getattr(self.cfg.data, 'bits_per_token', 18)) if not is_cont_tokens else 1
-                task_ids, prefix_mask = _sample_tasks_and_cond_masks(
-                    self.cfg, B, S, device=self.device, bits_per_token=bpt
-                )
-                cL_pos = None
-                cond_enabled = bool((task_ids != UNCONDITIONAL).any())
-            else:
-                cL_pos = _sample_cond_len_positions_per_example_continuous(
-                    self.cfg, B, S, device=self.device
-                )
-                cond_enabled = bool((cL_pos.max().item() if B > 0 else 0) > 0)
-                prefix_mask = _make_prefix_mask_from_lengths(cL_pos, S) if cond_enabled else None
+            cond_enabled = bool((cL_pos.max().item() if B > 0 else 0) > 0)
+            prefix_mask = _make_prefix_mask_from_lengths(cL_pos, S) if cond_enabled else None
 
         noise_prefix = True
         suffix_only_loss = False
         p_uncond = 0.0
 
         if cond_enabled:
-            if cond_text_audio:
-                noise_prefix = False
-                suffix_only_loss = True
-                p_uncond = 0.0
-            else:
-                noise_prefix = bool(getattr(cond_cfg, "noise_prefix", False))
-                suffix_only_loss = bool(getattr(cond_cfg, "loss_on_suffix_only", True))
-                p_uncond = float(getattr(cond_cfg, "p_uncond", 0.0))
-                p_uncond = max(0.0, min(1.0, p_uncond))
+            noise_prefix = bool(getattr(cond_cfg, "noise_prefix", False))
+            suffix_only_loss = bool(getattr(cond_cfg, "loss_on_suffix_only", True))
+            p_uncond = float(getattr(cond_cfg, "p_uncond", 0.0))
+            p_uncond = max(0.0, min(1.0, p_uncond))
 
         # ------------------------------------------------------------------
         # Draw sigma
@@ -1708,7 +1791,12 @@ class Trainer:
 
             loss_mask = None
             if suffix_only_loss and cond_enabled and (not noise_prefix):
-                loss_mask = (~prefix_mask).to(dtype=torch.float32)
+                target_mask = (
+                    regime_loss_mask
+                    if regime_loss_mask is not None
+                    else ~prefix_mask
+                )
+                loss_mask = target_mask.to(dtype=torch.float32)
 
             loss_target = x0_target if is_cont_tokens else x0_clean
 
@@ -2055,7 +2143,239 @@ class Trainer:
     # ──────────────────────────────────────────────────────────────────────
     # Training Loop
     # ──────────────────────────────────────────────────────────────────────
+    # Protein-only training path. The ordinary continuous/discrete paths below
+    # deliberately do not know about dict batches, task mixtures, or gradient
+    # accumulation.
+    def _protein_progress(self) -> float:
+        total = int(getattr(self.cfg.optim, "total_steps", 0) or 0)
+        return 0.0 if total <= 0 else min(1.0, max(0.0, self.global_step / total))
+
+    def _protein_replay_fraction(self) -> float:
+        if self.protein_mixture_schedule is not None:
+            from data.protein_tasks import REPLAY_CORPUS
+
+            return self.protein_mixture_schedule.corpus_fraction(
+                self._protein_progress(), REPLAY_CORPUS
+            )
+        return float(getattr(self.cfg.data, "sequence_replay_fraction", 0.0) or 0.0)
+
+    def _protein_refresh_mixture(self) -> None:
+        if self.protein_mixture_schedule is None:
+            return
+        from data.protein_tasks import PAIRED_CORPUS, REPLAY_CORPUS
+
+        progress = self._protein_progress()
+        for loader, corpus in (
+            (self.train_loader, PAIRED_CORPUS),
+            (self.protein_replay_loader, REPLAY_CORPUS),
+        ):
+            if loader is None:
+                continue
+            weights = self.protein_mixture_schedule.task_weights_for_corpus(
+                progress, corpus
+            )
+            collate = getattr(loader, "collate_fn", None)
+            if weights and collate is not None and hasattr(collate, "task_weights"):
+                collate.task_weights = dict(weights)
+
+    def _protein_should_replay(self) -> bool:
+        if self.protein_replay_loader is None:
+            return False
+        fraction = self._protein_replay_fraction()
+        if fraction <= 0.0:
+            return False
+        seed = int(getattr(self.cfg.train, "seed", 42))
+        draw = np.random.default_rng(
+            (seed, 777, int(self.global_step), int(self._protein_accum_counter))
+        ).random()
+        return bool(draw < fraction)
+
+    def _protein_next_replay_batch(self):
+        if self._protein_replay_iter is None:
+            self._protein_replay_iter = iter(self.protein_replay_loader)
+        try:
+            return next(self._protein_replay_iter)
+        except StopIteration:
+            self._protein_replay_iter = iter(self.protein_replay_loader)
+            return next(self._protein_replay_iter)
+
+    @staticmethod
+    def _protein_set_loader_epoch(loader, epoch: int) -> None:
+        if loader is None:
+            return
+        for obj in (
+            getattr(loader, "dataset", None),
+            getattr(loader, "sampler", None),
+            getattr(loader, "batch_sampler", None),
+            getattr(loader, "collate_fn", None),
+        ):
+            if obj is not None and hasattr(obj, "set_epoch"):
+                obj.set_epoch(epoch)
+
+    def _step_protein(self, batch, is_train: bool):
+        """One protein micro-step, based on Bruno's multimodal step."""
+        from trainers.multimodal_step import multimodal_training_step
+
+        accum = self.protein_grad_accum_steps
+        boundary = (not is_train) or self._protein_accum_counter + 1 >= accum
+        suppress_sync = (
+            is_train
+            and not boundary
+            and self.ddp_active
+            and hasattr(self.model, "no_sync")
+        )
+        sync_ctx = self.model.no_sync() if suppress_sync else contextlib.nullcontext()
+        with autocast(
+            self.device.type, enabled=self.amp_enabled, dtype=self.amp_dtype
+        ):
+            loss, components = multimodal_training_step(
+                self.model,
+                batch,
+                self.proc,
+                self.cfg,
+                device=self.device,
+                is_train=is_train,
+            )
+
+        if is_train:
+            if self._protein_accum_counter == 0:
+                self.opt.zero_grad(set_to_none=True)
+            with sync_ctx:
+                scaled_loss = loss / accum
+                if self.use_scaler:
+                    self.scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+            if boundary:
+                if self.use_scaler:
+                    if self.grad_clip > 0:
+                        self.scaler.unscale_(self.opt)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.scaler.step(self.opt)
+                    self.scaler.update()
+                else:
+                    if self.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.opt.step()
+                self.lr_sched.step()
+                self.ema.update(self.model)
+                self._protein_accum_counter = 0
+            else:
+                self._protein_accum_counter += 1
+
+        self._last_protein_components = {
+            key: float(value) for key, value in components.items()
+        }
+        return loss.item(), boundary
+
+    @torch.compiler.disable
+    @torch.no_grad()
+    def _validate_protein(self):
+        self.model.eval()
+        self.ema.apply(self.model)
+        local_loss = torch.tensor(0.0, device=self.device)
+        local_count = torch.tensor(0.0, device=self.device)
+        try:
+            pbar = tqdm(
+                self.val_loader,
+                desc="Validating proteins",
+                leave=False,
+                disable=not self.is_master,
+            )
+            for batch in pbar:
+                loss, _ = self._step_protein(batch, is_train=False)
+                local_loss += loss
+                local_count += 1
+            if self.ddp_active:
+                dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
+                dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+            return (local_loss / local_count.clamp_min(1.0)).item()
+        finally:
+            self.ema.restore(self.model)
+
+    def _train_protein(self):
+        """Targeted protein loop; all non-protein configs use train() unchanged."""
+        target_total_steps = int(getattr(self.cfg.optim, "total_steps", 0) or 0)
+        stop_training = False
+        try:
+            for epoch in range(self.start_epoch, self.cfg.train.epochs):
+                self._protein_refresh_mixture()
+                self._protein_set_loader_epoch(self.train_loader, epoch)
+                self._protein_set_loader_epoch(self.val_loader, epoch)
+                self._protein_set_loader_epoch(self.protein_replay_loader, epoch)
+                self._protein_replay_iter = None
+                self.model.train()
+                train_loss = 0.0
+                microbatches = 0
+                pbar = tqdm(
+                    self.train_loader,
+                    desc=f"Epoch {epoch + 1}/{self.cfg.train.epochs}",
+                    leave=True,
+                    disable=not self.is_master,
+                )
+                for paired_batch in pbar:
+                    if target_total_steps > 0 and self.global_step >= target_total_steps:
+                        stop_training = True
+                        break
+                    if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                        torch.compiler.cudagraph_mark_step_begin()
+                    batch = (
+                        self._protein_next_replay_batch()
+                        if self._protein_should_replay()
+                        else paired_batch
+                    )
+                    loss, did_step = self._step_protein(batch, is_train=True)
+                    train_loss += loss
+                    microbatches += 1
+                    if not did_step:
+                        continue
+
+                    self.global_step += 1
+                    self._protein_refresh_mixture()
+                    self._maybe_save_resume_ckpt(epoch)
+                    self._maybe_save_interval_ckpt(epoch)
+                    if self.is_master:
+                        pbar.set_postfix(loss=f"{loss:.4f}")
+                        if (
+                            self.tb_scalar_every_steps > 0
+                            and self.global_step % self.tb_scalar_every_steps == 0
+                        ):
+                            self.writer.add_scalar("loss/iter_train", loss, self.global_step)
+                            self.writer.add_scalar(
+                                "learning_rate", self.opt.param_groups[0]["lr"], self.global_step
+                            )
+                    if target_total_steps > 0 and self.global_step >= target_total_steps:
+                        stop_training = True
+                        break
+
+                if microbatches == 0:
+                    break
+                avg_train_loss = train_loss / microbatches
+                avg_val_loss = self._validate_protein()
+                if self.is_master:
+                    self.writer.add_scalar("loss/epoch_train", avg_train_loss, self.global_step)
+                    self.writer.add_scalar("loss/epoch_val", avg_val_loss, self.global_step)
+                    print(
+                        f"Epoch {epoch + 1}: Train Loss = {avg_train_loss:.4f}, "
+                        f"Val Loss = {avg_val_loss:.4f}"
+                    )
+                    self._save_ckpt(epoch, avg_val_loss)
+                    if self.tb is not None:
+                        self.tb.flush()
+                if self.ddp_active:
+                    dist.barrier()
+                if stop_training:
+                    break
+        finally:
+            if self.is_master and self.tb is not None:
+                self.tb.close()
+            if self.use_wandb and wandb is not None and self.is_master:
+                wandb.finish()
+
     def train(self):
+        if self.is_protein:
+            return self._train_protein()
+
         step_fn = self._step_continuous if self.cfg.framework == "continuous_score" else self._step_discrete
 
         # IMPORTANT: callbacks may include run_on_all_ranks=True (e.g. offline entropy)

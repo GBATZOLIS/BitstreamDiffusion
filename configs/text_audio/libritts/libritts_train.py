@@ -63,6 +63,7 @@ def get_config():
     # ------------------------------------------------------------------
     cfg.cond = config_dict.ConfigDict()
     cfg.cond.enabled = True
+    cfg.cond.regime_adapter = "text_audio"
     cfg.cond.continuation_prefix = 75
     cfg.cond.unconditional_rate = 0.25
     cfg.cond.texttospeech_rate = 0.25

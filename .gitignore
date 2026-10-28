@@ -27,11 +27,21 @@ MANIFEST
 # Virtual environments
 .env
 .venv
+.venvs/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local dependency/tool caches
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+tmp/uv-cache/
+tmp/uv-python/
+tmp/uv-tools/
+tmp/uv-bin/
 
 # Editor / OS
 .vscode/
@@ -55,6 +65,8 @@ logs/
 # hf_cache  — HuggingFace model cache symlink (gpt2-large, tokenizers, etc.)
 hf_cache
 hf_cache/
+# Pinned third-party protein evaluator source trees
+external/
 # wandb/     — Weights & Biases run directory
 wandb/
 generated_samples/

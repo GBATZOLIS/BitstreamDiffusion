@@ -132,6 +132,9 @@ def build(*, patch_size: int, caption_len_tokens: int = 12,
     if "multimodal" in cfg.evaluation:
         cfg.evaluation.multimodal.decode_cache = root
     cfg.evaluation.checkpoint_path = f"runs/{cfg.experiment}/checkpoints/last.pt"
+    cfg.evaluation.out_dir = f"runs/{cfg.experiment}/evaluation"
+    cfg.evaluation.samples_dir = f"runs/{cfg.experiment}/evaluation/samples"
+    cfg.evaluation.results_csv = f"runs/{cfg.experiment}/evaluation/results.csv"
 
     # Smoke override: tiny corpus + tiny batch so a shakedown fits on one GPU and
     # the callback fires on the first epoch.
@@ -148,6 +151,9 @@ def build(*, patch_size: int, caption_len_tokens: int = 12,
         # run's directory for the real run to then resume from.
         cfg.experiment = f"{cfg.experiment}_smoke"
         cfg.evaluation.checkpoint_path = f"runs/{cfg.experiment}/checkpoints/last.pt"
+        cfg.evaluation.out_dir = f"runs/{cfg.experiment}/evaluation"
+        cfg.evaluation.samples_dir = f"runs/{cfg.experiment}/evaluation/samples"
+        cfg.evaluation.results_csv = f"runs/{cfg.experiment}/evaluation/results.csv"
         cfg.train.batch_size = int(os.environ.get("SMOKE_BATCH", "16"))
         cfg.train.mnist_sum_eval.every_k_steps = int(os.environ.get("MS_EVAL_EVERY", "10"))
         # Eval shapes default to tiny, but are env-overridable so a smoke can be

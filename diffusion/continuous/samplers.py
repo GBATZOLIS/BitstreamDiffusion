@@ -638,6 +638,23 @@ def _build_mask_conditioning(
 # -----------------------------------------------------------------------------
 
 
+def truncate_schedule(
+    sigmas: torch.Tensor, sigma_start: float
+) -> torch.Tensor:
+    """Keep the tail of a descending sigma schedule at or below sigma_start."""
+    s_start = float(sigma_start)
+    tail = [s for s in sigmas.tolist() if s < s_start]
+    out = torch.tensor(
+        [s_start] + tail, device=sigmas.device, dtype=sigmas.dtype
+    )
+    if out.numel() < 2:
+        raise ValueError(
+            f"sigma_start={s_start} leaves fewer than two schedule points;"
+            f" raise sigma_start or raise num_steps"
+        )
+    return out
+
+
 class SigmaSchedule:
     """
     Provides sampling sigma schedules (karras/entropic) and entropy table IO.
@@ -1030,6 +1047,8 @@ class HeunSampler:
         ati_eta: Optional[float] = None,
         return_probs: bool = False,
         progress: bool = True,
+        x_init: Optional[torch.Tensor] = None,
+        sigma_start: Optional[float] = None,
     ):
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
@@ -1045,6 +1064,8 @@ class HeunSampler:
             sigma_min_override=sigma_min_override,
             sigma_max_override=sigma_max_override,
         )
+        if sigma_start is not None:
+            sigmas = truncate_schedule(sigmas, sigma_start)
         stoch_cfg = self.sigmas.resolve_stochastic_cfg(
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
@@ -1074,11 +1095,24 @@ class HeunSampler:
         guidance_scale = float(guidance_scale)
         use_cfg = bool(cond_enabled and (guidance_scale > 0.0))
 
-        if self.is_cont_tokens:
+        if x_init is not None:
+            x0_clean = x_init.to(device=self.device, dtype=torch.float32)
+            if x0_clean.shape[0] == 1 and B > 1:
+                x0_clean = x0_clean.expand(
+                    B, *x0_clean.shape[1:]
+                ).contiguous()
+            if x0_clean.shape[0] != B:
+                raise ValueError(
+                    f"x_init batch {x0_clean.shape[0]} does not match "
+                    f"num_samples {B}"
+                )
+            x = x0_clean + torch.randn_like(x0_clean) * sigma0
+        elif self.is_cont_tokens:
             x = torch.randn(B, S, self.vocab_size, device=self.device, dtype=torch.float32) * sigma0
         else:
             x = torch.randn(B, S, device=self.device, dtype=torch.float32) * sigma0
-        x = x + self.data_center
+        if x_init is None:
+            x = x + self.data_center
 
         if cond_enabled:
             _clamp_mask_(x, prefix_full, prefix_mask)
@@ -1582,6 +1616,8 @@ class DDIMSampler:
         ati_eta: Optional[float] = None,
         return_probs: bool = False,
         progress: bool = True,
+        x_init: Optional[torch.Tensor] = None,
+        sigma_start: Optional[float] = None,
     ):
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
@@ -1597,6 +1633,8 @@ class DDIMSampler:
             sigma_min_override=sigma_min_override,
             sigma_max_override=sigma_max_override,
         )
+        if sigma_start is not None:
+            sigmas = truncate_schedule(sigmas, sigma_start)
         stoch_cfg = self.sigmas.resolve_stochastic_cfg(
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
@@ -1625,11 +1663,24 @@ class DDIMSampler:
         guidance_scale = float(guidance_scale)
         use_cfg = bool(cond_enabled and (guidance_scale > 0.0))
 
-        if self.is_cont_tokens:
+        if x_init is not None:
+            x0_clean = x_init.to(device=self.device, dtype=torch.float32)
+            if x0_clean.shape[0] == 1 and B > 1:
+                x0_clean = x0_clean.expand(
+                    B, *x0_clean.shape[1:]
+                ).contiguous()
+            if x0_clean.shape[0] != B:
+                raise ValueError(
+                    f"x_init batch {x0_clean.shape[0]} does not match "
+                    f"num_samples {B}"
+                )
+            x = x0_clean + torch.randn_like(x0_clean) * sigma0
+        elif self.is_cont_tokens:
             x = torch.randn(B, S, self.vocab_size, device=self.device, dtype=torch.float32) * sigma0
         else:
             x = torch.randn(B, S, device=self.device, dtype=torch.float32) * sigma0
-        x = x + self.data_center
+        if x_init is None:
+            x = x + self.data_center
 
         if cond_enabled:
             _clamp_mask_(x, prefix_full, prefix_mask)

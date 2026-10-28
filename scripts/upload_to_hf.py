@@ -1,114 +1,238 @@
-#!/usr/bin/env python
-"""Upload the released CoBit checkpoints + artefacts to a Hugging Face Hub repo.
+#!/usr/bin/env python3
+"""Upload CoBit text or protein model files to Hugging Face.
 
-This packages everything a downloader needs to reproduce the paper tables:
-the three EMA checkpoints (CoBit-S LM1B, CoBit-S OWT, CoBit-M OWT), the OWT
-16-bit code tokenizer, and the dataset-specific entropy-rate schedule tables.
+Use --model protein with --checkpoint for the protein model. The upload
+includes the paper config and the checkpoint's frozen entropy tables.
+Downloaded datasets, logs, and evaluation outputs are not collected.
 
-Prerequisites
--------------
-    python -m pip install "huggingface_hub>=0.23"
-    # A *write* access token from https://huggingface.co/settings/tokens
-    export HF_TOKEN=hf_xxx              # or pass --token / use `hf auth login`
-
-Layout produced on the Hub (repo_type=model)
----------------------------------------------
-    checkpoints/cobit_s_lm1b_1M_ema.pt
-    checkpoints/cobit_s_owt_750k_ema.pt
-    checkpoints/cobit_m_owt_750k_ema.pt
-    tokenizer/tokenizer_gpt2id_bpe16_65536_base1024.json
-    tokenizer/tokenizer_gpt2id_bpe16_65536_base1024.meta.json
-    entropy_tables/lm1b/{pdf,cdf,sigmas,edges}.pt
-    entropy_tables/owt/{pdf,cdf,sigmas,edges}.pt
-    entropy_tables/owt_medium/{pdf,cdf,sigmas,edges}.pt
-
-Usage
------
-    python scripts/upload_to_hf.py --repo-id <user-or-org>/CoBit
-    # dry-run first to see exactly what would be pushed:
-    python scripts/upload_to_hf.py --repo-id <user-or-org>/CoBit --dry-run
+Use --dry-run to check the file list and hashes without uploading.
+Authenticate with HF_TOKEN or cached Hugging Face credentials.
 """
+
+from __future__ import annotations
+
 import argparse
+import hashlib
+import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ENTROPY_TABLES = (
+    "entropy_pdf.pt",
+    "entropy_cdf.pt",
+    "entropy_sigmas.pt",
+    "entropy_edges.pt",
+)
 
 
-def _resolve(p: Path) -> Path:
-    return p if p.is_absolute() else (REPO_ROOT / p)
+def _resolve(path: Path) -> Path:
+    path = path.expanduser()
+    return (path if path.is_absolute() else REPO_ROOT / path).resolve()
 
 
 def build_manifest(release_dir: Path) -> list[tuple[Path, str]]:
-    """Return [(local_path, path_in_repo)] for everything we ship."""
-    rd = _resolve(release_dir)
-    assets = _resolve(Path("assets/entropy_tables"))
-    tok_dir = _resolve(Path("datasets/openwebtext_gpt2_trainm100k"))
-
-    manifest: list[tuple[Path, str]] = [
-        (rd / "cobit_s_lm1b_step001000000_ema.pt", "checkpoints/cobit_s_lm1b_1M_ema.pt"),
-        (rd / "cobit_s_owt_step000750000_ema.pt",  "checkpoints/cobit_s_owt_750k_ema.pt"),
-        (rd / "cobit_m_owt_step000750000_ema.pt",  "checkpoints/cobit_m_owt_750k_ema.pt"),
-        (tok_dir / "tokenizer_gpt2id_bpe16_65536_base1024.json",
-         "tokenizer/tokenizer_gpt2id_bpe16_65536_base1024.json"),
-        (tok_dir / "tokenizer_gpt2id_bpe16_65536_base1024.meta.json",
-         "tokenizer/tokenizer_gpt2id_bpe16_65536_base1024.meta.json"),
+    """List the files for the original text model release."""
+    release_dir = _resolve(release_dir)
+    assets = REPO_ROOT / "assets/entropy_tables"
+    tokenizer = REPO_ROOT / "datasets/openwebtext_gpt2_trainm100k"
+    manifest = [
+        (
+            release_dir / "cobit_s_lm1b_step001000000_ema.pt",
+            "checkpoints/cobit_s_lm1b_1M_ema.pt",
+        ),
+        (
+            release_dir / "cobit_s_owt_step000750000_ema.pt",
+            "checkpoints/cobit_s_owt_750k_ema.pt",
+        ),
+        (
+            release_dir / "cobit_m_owt_step000750000_ema.pt",
+            "checkpoints/cobit_m_owt_750k_ema.pt",
+        ),
     ]
-    for ds in ("lm1b", "owt", "owt_medium"):
-        for name in ("entropy_pdf.pt", "entropy_cdf.pt", "entropy_sigmas.pt", "entropy_edges.pt"):
-            manifest.append((assets / ds / name, f"entropy_tables/{ds}/{name}"))
+    for suffix in (".json", ".meta.json"):
+        name = "tokenizer_gpt2id_bpe16_65536_base1024" + suffix
+        manifest.append((tokenizer / name, f"tokenizer/{name}"))
+    for dataset in ("lm1b", "owt", "owt_medium"):
+        for name in ENTROPY_TABLES:
+            manifest.append(
+                (
+                    assets / dataset / name,
+                    f"entropy_tables/{dataset}/{name}",
+                )
+            )
     return manifest
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repo-id", required=True, help="e.g. your-username/CoBit")
-    ap.add_argument("--release-dir", default="release", type=Path, help="dir holding the *_ema.pt checkpoints")
-    ap.add_argument("--token", default=os.environ.get("HF_TOKEN"), help="HF write token (or set HF_TOKEN)")
-    ap.add_argument("--private", action="store_true", help="create the repo as private")
-    ap.add_argument("--dry-run", action="store_true", help="print the manifest and exit without uploading")
-    args = ap.parse_args()
+def build_protein_manifest(
+    checkpoint: Path,
+    entropy_dir: Path | None = None,
+    config: Path = Path("configs/proteins/proteins_400m.py"),
+) -> list[tuple[Path, str]]:
+    """List only the protein checkpoint, config, and entropy files."""
+    checkpoint = _resolve(checkpoint)
+    entropy_dir = (
+        _resolve(entropy_dir)
+        if entropy_dir is not None
+        else checkpoint.parent.parent
+    )
+    return [
+        (checkpoint, "checkpoints/best.pt"),
+        (_resolve(config), "configs/proteins/proteins_400m.py"),
+        (entropy_dir / "entropy_profile.json", "entropy_profile.json"),
+        *((entropy_dir / name, name) for name in ENTROPY_TABLES),
+    ]
 
-    manifest = build_manifest(args.release_dir)
 
-    missing = [str(src) for src, _ in manifest if not src.exists()]
-    print("=== upload manifest ===")
-    for src, dst in manifest:
-        flag = "  MISSING" if not src.exists() else ""
-        size = f"{src.stat().st_size/1e9:.2f} GB" if src.exists() else "—"
-        print(f"  {dst:55s} <- {src}  ({size}){flag}")
-    if missing:
-        print(f"\n{len(missing)} file(s) missing — produce the *_ema.pt checkpoints with "
-              f"scripts/owt/make_release_checkpoint.py first.", file=sys.stderr)
-        if not args.dry_run:
-            sys.exit(1)
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
-    if args.dry_run:
-        print("\n(dry-run) nothing uploaded.")
-        return
 
+def validate_protein_manifest(manifest: list[tuple[Path, str]]) -> None:
+    """Check that the entropy files belong to the selected checkpoint."""
+    files = {destination: source for source, destination in manifest}
+    profile = json.loads(
+        files["entropy_profile.json"].read_text(encoding="utf-8")
+    )
     try:
-        from huggingface_hub import HfApi
-    except ImportError:
-        print("huggingface_hub not installed: python -m pip install 'huggingface_hub>=0.23'", file=sys.stderr)
-        sys.exit(1)
+        checkpoint_hash = profile["checkpoint"]["sha256"]
+        table_hashes = profile["results"]["entropy_tables"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("The entropy profile is incomplete.") from exc
+    if not isinstance(table_hashes, dict) or set(table_hashes) != set(
+        ENTROPY_TABLES
+    ):
+        raise ValueError("The entropy profile must list all four tables.")
+    if _sha256(files["checkpoints/best.pt"]) != checkpoint_hash:
+        raise ValueError(
+            "The entropy profile belongs to another checkpoint. "
+            "Run the entropy task for this checkpoint first."
+        )
+    for name in ENTROPY_TABLES:
+        if _sha256(files[name]) != table_hashes[name]:
+            raise ValueError(f"Entropy table changed: {name}")
 
-    # token=None falls back to cached credentials from `hf auth login` (preferred:
-    # no token in the shell history). If neither is present, create_repo below
-    # raises a clear auth error.
-    if not args.token:
-        print("No --token/HF_TOKEN given; using cached `hf auth login` credentials.")
-    api = HfApi(token=args.token or None)
-    print(f"\nCreating/ensuring repo {args.repo_id} (private={args.private}) ...")
-    api.create_repo(repo_id=args.repo_id, repo_type="model", private=args.private, exist_ok=True)
 
-    for src, dst in manifest:
-        print(f"uploading {dst} ...")
-        api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                        repo_id=args.repo_id, repo_type="model")
-    print(f"\n✓ Done. https://huggingface.co/{args.repo_id}")
+def upload_manifest(
+    manifest: list[tuple[Path, str]],
+    repo_id: str,
+    token: str | None,
+    private: bool,
+) -> None:
+    """Upload the listed files together in one Hub commit."""
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    api = HfApi(token=token or None)
+    operations = [
+        CommitOperationAdd(path_in_repo=destination, path_or_fileobj=source)
+        for source, destination in manifest
+    ]
+    api.create_repo(
+        repo_id=repo_id,
+        repo_type="model",
+        private=private,
+        exist_ok=True,
+    )
+    api.create_commit(
+        repo_id=repo_id,
+        repo_type="model",
+        operations=operations,
+        commit_message="Upload CoBit model files",
+        num_threads=1,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--model", choices=("text", "protein"), default="text")
+    parser.add_argument(
+        "--release-dir",
+        default=Path("release"),
+        type=Path,
+        help="Directory holding the text release checkpoints.",
+    )
+    parser.add_argument(
+        "--checkpoint", type=Path, help="Protein checkpoint to upload."
+    )
+    parser.add_argument(
+        "--entropy-dir",
+        type=Path,
+        help="Entropy files directory; defaults to the checkpoint run.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Protein config; defaults to configs/proteins/proteins_400m.py.",
+    )
+    parser.add_argument(
+        "--token", default=os.environ.get("HF_TOKEN"), help="HF write token."
+    )
+    parser.add_argument(
+        "--private", action="store_true", help="Create a private repository."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Check files without uploading."
+    )
+    args = parser.parse_args(argv)
+
+    if args.model == "protein":
+        if args.checkpoint is None:
+            parser.error("--checkpoint is required for --model protein.")
+        manifest = build_protein_manifest(
+            args.checkpoint,
+            args.entropy_dir,
+            args.config or Path("configs/proteins/proteins_400m.py"),
+        )
+    else:
+        if any((args.checkpoint, args.entropy_dir, args.config)):
+            parser.error(
+                "--checkpoint, --entropy-dir, and --config require "
+                "--model protein."
+            )
+        manifest = build_manifest(args.release_dir)
+
+    missing = []
+    print("Upload manifest:")
+    for source, destination in manifest:
+        if source.is_file():
+            size = f"{source.stat().st_size / 1e9:.2f} GB"
+        else:
+            size = "MISSING"
+            missing.append(source)
+        print(f"  {destination} <- {source} ({size})")
+    if missing:
+        print(f"{len(missing)} required file(s) missing.", file=sys.stderr)
+        if args.model == "protein":
+            print(
+                "Run scripts/proteins/evaluate.py entropy for this "
+                "checkpoint first.",
+                file=sys.stderr,
+            )
+        elif args.dry_run:
+            print("Dry run: nothing uploaded.")
+            return 0
+        return 1
+    if args.model == "protein":
+        try:
+            validate_protein_manifest(manifest)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    if args.dry_run:
+        print("Dry run: all files checked; nothing uploaded.")
+        return 0
+
+    upload_manifest(manifest, args.repo_id, args.token, args.private)
+    print(f"Done: https://huggingface.co/{args.repo_id}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
