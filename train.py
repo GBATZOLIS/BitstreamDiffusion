@@ -17,11 +17,15 @@ def _is_distributed():
 def _setup_ddp():
     """Initialize DDP process group if distributed."""
     if _is_distributed():
-        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=20))
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         torch.cuda.set_device(local_rank)
+        dist.init_process_group(
+            backend="nccl",
+            timeout=datetime.timedelta(minutes=20),
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
         # Only print setup info on master or for debugging
         if rank == 0:
             print(f"🚀 DDP Initialized: Global Rank {rank}, World Size {world_size}")
@@ -41,6 +45,8 @@ def _update_cfg_from_dict(cfg, d, skip_sections=("logging", "system", "evaluatio
             if not hasattr(cfg, k) or getattr(cfg, k) is None:
                 setattr(cfg, k, config_dict.ConfigDict())
             _update_cfg_from_dict(getattr(cfg, k), v, skip_sections=skip_sections)
+        elif isinstance(v, list):
+            setattr(cfg, k, [config_dict.ConfigDict(x) if isinstance(x, dict) else x for x in v])
         else:
             setattr(cfg, k, v)
 

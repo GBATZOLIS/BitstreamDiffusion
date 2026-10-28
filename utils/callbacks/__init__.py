@@ -11,8 +11,38 @@ from .entropy_schedule_plot import EntropySchedulePlotCallback
 from .offline_entropy_profile import OfflineEntropyProfileCallback
 from .vlb_bound import VLBBoundCallback
 from .external_ppl import ExternalPPLCallback
-from .mauve import MauveCallback
+try:
+    from .mauve import MauveCallback
+except ImportError as _mauve_import_error:  # pragma: no cover - optional extra
+    class MauveCallback:  # type: ignore[no-redef]
+        """Placeholder used when the optional MAUVE dependency is absent."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "MauveCallback requires the eval extra. Install it with "
+                "`uv sync --extra eval`."
+            ) from _mauve_import_error
 from .visualization import VisualizationCallback
+# TextAudioCallback's module level reaches the full speech stack (jiwer /
+# fairseq / s3prl / NeMo -- see scripts/text_audio/textaudio_install.sh). Guard it so that
+# importing this package does not require the audio dependencies; an audio
+# config that actually asks for the callback still fails, loudly, on
+# construction rather than being silently skipped.
+try:
+    from .textaudio_generation import TextAudioCallback
+except ImportError as _e:  # pragma: no cover - depends on optional extras
+    _TEXTAUDIO_IMPORT_ERROR = _e
+
+    class TextAudioCallback:  # type: ignore[no-redef]
+        """Placeholder raised into existence only if the audio extras are absent."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "TextAudioCallback requires the text+audio extras, which are not "
+                f"installed in this environment (original error: {_TEXTAUDIO_IMPORT_ERROR}). "
+                "Install them with textaudio_install.sh."
+            ) from _TEXTAUDIO_IMPORT_ERROR
+from .mnist_sum_eval import MNISTSumEvalCallback
 
 # Optional extras (export only if you want them available)
 # from .entropy_schedule import EntropyScheduleCallback
@@ -28,4 +58,6 @@ __all__ = [
     "VLBBoundCallback",
     # "EntropyScheduleCallback",
     # "denoise_grid",
+    "TextAudioCallback",
+    "MNISTSumEvalCallback",
 ]

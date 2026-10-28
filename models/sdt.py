@@ -70,6 +70,7 @@ class SelfAttention(nn.Module):
         use_flash_attn: bool = False,
         use_rope: bool = False,
         rope_base: float = 10_000.0,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.d_model = int(d_model)
@@ -78,6 +79,14 @@ class SelfAttention(nn.Module):
         self.head_dim = self.d_model // self.nhead
         self.cross_attn = bool(cross_attn)
         self.dropout = float(dropout)
+
+        self.qk_norm = bool(qk_norm)
+        if self.qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim)
+            self.k_norm = nn.RMSNorm(self.head_dim)
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         if self.cross_attn:
             self.q_proj = nn.Linear(self.d_model, self.d_model, bias=True)
@@ -136,6 +145,10 @@ class SelfAttention(nn.Module):
         q = self._split_heads(q)
         k = self._split_heads(k)
         v = self._split_heads(v)
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.rope is not None:
             l = q.shape[-2]
@@ -249,6 +262,7 @@ class PreNormBlockAda(nn.Module):
         use_flash_attn: bool = False,
         use_rope: bool = False,
         rope_base: float = 10_000.0,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.dim_ff = int(dim_ff or (4 * d_model))
@@ -260,6 +274,7 @@ class PreNormBlockAda(nn.Module):
             use_flash_attn=use_flash_attn,
             use_rope=use_rope,
             rope_base=rope_base,
+            qk_norm=qk_norm,
         )
         if use_swiglu:
             hidden = int(2 * self.dim_ff / 3)
@@ -748,6 +763,51 @@ class SequenceVDTContinuousModel(nn.Module):
         else:
             raise ValueError(f"Unsupported representation/framework combination: {cfg.framework}, {self.representation}")
 
+        # Protein sequence+structure path. Everything in this branch is
+        # explicitly opt-in so existing text, text-audio, and MNIST models
+        # retain their original modules, state dicts, and forward behavior.
+        self.protein = bool(getattr(cfg.model, "protein", False))
+        if self.protein:
+            if not self.is_continuous_bits:
+                raise ValueError(
+                    "cfg.model.protein requires continuous binary representation"
+                )
+            from models.protein_multimodal import (
+                GlobalTaskConditioning,
+                ModalityTimeFusion,
+                MultimodalBitEmbeddings,
+                ResiduePositionFeatures,
+            )
+
+            self.protein_embed = MultimodalBitEmbeddings(
+                self.C, patch_size=self.P
+            )
+            self.protein_time_fusion = (
+                ModalityTimeFusion(self.E)
+                if bool(getattr(cfg.model, "asymmetric_modality_time", False))
+                else None
+            )
+            self.protein_global_cond = (
+                GlobalTaskConditioning(self.E)
+                if bool(getattr(cfg.model, "length_conditioning", False))
+                else None
+            )
+            self.protein_residue_pos = (
+                ResiduePositionFeatures(
+                    self.E,
+                    use_fraction=bool(
+                        getattr(cfg.model, "residue_pos_fraction", False)
+                    ),
+                )
+                if bool(getattr(cfg.model, "residue_pos_features", False))
+                else None
+            )
+        else:
+            self.protein_embed = None
+            self.protein_time_fusion = None
+            self.protein_global_cond = None
+            self.protein_residue_pos = None
+
         # ---- positional features ----
         self.n_fourier_global = int(getattr(cfg.model, "n_fourier_global", 8))
         self.n_fourier_local = int(getattr(cfg.model, "n_fourier_local", 4))
@@ -777,6 +837,7 @@ class SequenceVDTContinuousModel(nn.Module):
         self.unpatch_proj_content = None if self.head_type == "token_full" else nn.Linear(self.E, self.patch_dim_out_content)
 
         dim_ff = int(getattr(cfg.model, "dim_ff", 4 * self.E))
+        self.qk_norm = bool(getattr(cfg.model, "qk_norm", False))
         if use_adaln:
             self.blocks = nn.ModuleList(
                 [
@@ -789,6 +850,7 @@ class SequenceVDTContinuousModel(nn.Module):
                         use_flash_attn=use_flash_attn_blocks,
                         use_rope=self.use_rope_trunk,
                         rope_base=self.rope_base,
+                        qk_norm=self.qk_norm,
                     )
                     for _ in range(l)
                 ]
@@ -808,6 +870,12 @@ class SequenceVDTContinuousModel(nn.Module):
                     for _ in range(l)
                 ]
             )
+
+        self.final_norm = (
+            nn.LayerNorm(self.E)
+            if bool(getattr(cfg.model, "final_norm", False))
+            else None
+        )
 
         # ---- heads ----
         self.head = None
@@ -974,7 +1042,9 @@ class SequenceVDTContinuousModel(nn.Module):
 
     def _build_continuous_embed_1ch(self, x: torch.Tensor, c_in: torch.Tensor) -> torch.Tensor:
         """x: [B,S] -> [B,S,C]"""
-        x_scaled = x * c_in.view(-1, 1)
+        # Protein training supplies a per-bit sigma map [B,S]; legacy
+        # continuous runs retain their per-example sigma [B].
+        x_scaled = x * (c_in if c_in.dim() == x.dim() else c_in.view(-1, 1))
         if self.cont_input_proj is None:
             return x_scaled.unsqueeze(-1)
         return self.cont_input_proj(x_scaled.unsqueeze(-1))
@@ -984,6 +1054,7 @@ class SequenceVDTContinuousModel(nn.Module):
         x_t: torch.Tensor,
         sigma: torch.Tensor,
         x0_hat: Optional[torch.Tensor],
+        state_ids: Optional[torch.Tensor] = None,
     ):
         sigma_data = float(self.cfg.diffusion.continuous.sigma_data)
         c_in = 1.0 / (sigma.pow(2) + sigma_data**2).sqrt()
@@ -992,6 +1063,8 @@ class SequenceVDTContinuousModel(nn.Module):
         if self.center_inputs:
             x_noisy = x_noisy - self.data_center
         noisy_emb = self._build_continuous_embed_1ch(x_noisy, c_in)
+        if self.protein_embed is not None:
+            noisy_emb = self.protein_embed(noisy_emb, state_ids)
 
         if not self.self_condition:
             content = noisy_emb
@@ -1064,6 +1137,11 @@ class SequenceVDTContinuousModel(nn.Module):
         x_t: torch.Tensor,
         sigma: torch.Tensor,
         x0_hat: Optional[torch.Tensor] = None,
+        *,
+        slot_state: Optional[torch.Tensor] = None,
+        bit_state_ids: Optional[torch.Tensor] = None,
+        modality_sigmas: Optional[torch.Tensor] = None,
+        residue_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Shapes:
@@ -1071,7 +1149,17 @@ class SequenceVDTContinuousModel(nn.Module):
           - continuous bits:        x_t [B,S]
           - continuous one-hot:     x_t [B,S,V]
         """
-        if sigma.dim() != 1 or x_t.size(0) != sigma.size(0):
+        protein_call = self.protein and (
+            modality_sigmas is not None
+            or slot_state is not None
+            or bit_state_ids is not None
+        )
+        if protein_call:
+            if x_t.size(0) != sigma.size(0) or sigma.dim() not in (1, 2):
+                raise RuntimeError(
+                    "Protein sigma must be [B] or a per-bit map [B,S]"
+                )
+        elif sigma.dim() != 1 or x_t.size(0) != sigma.size(0):
             raise RuntimeError("Expected x_t batch dimension to match sigma [B]")
 
         if self.is_discrete_tokens or self.is_discrete_bits:
@@ -1083,7 +1171,20 @@ class SequenceVDTContinuousModel(nn.Module):
             if x_t.dim() != 2:
                 raise RuntimeError("Continuous bit runs expect x_t with shape [B,S]")
             b, s_orig = x_t.shape
-            content, x_skip = self._build_content_continuous_bits(x_t, sigma, x0_hat)
+            state_ids = None
+            if bit_state_ids is not None:
+                state_ids = bit_state_ids.to(device=x_t.device, dtype=torch.long)
+                if state_ids.shape != x_t.shape:
+                    raise RuntimeError(
+                        "bit_state_ids must have the same shape as x_t"
+                    )
+            elif self.protein_embed is not None and slot_state is not None:
+                from models.protein_multimodal import build_state_ids_from_states
+
+                state_ids = build_state_ids_from_states(slot_state)
+            content, x_skip = self._build_content_continuous_bits(
+                x_t, sigma, x0_hat, state_ids=state_ids
+            )
         elif self.is_continuous_tokens:
             if x_t.dim() != 3:
                 raise RuntimeError("Continuous token runs expect x_t with shape [B,S,V]")
@@ -1108,7 +1209,44 @@ class SequenceVDTContinuousModel(nn.Module):
         tokens_in, n = self._patchify(x_pad)
         tokens = self.patch_proj(tokens_in)
 
-        t_emb = self.time_cond(self.time_proj(self.time_fn(sigma)))
+        if protein_call and modality_sigmas is not None:
+            from models.protein_multimodal import two_modality_time_sigma
+
+            t_base = two_modality_time_sigma(
+                self.time_fn,
+                modality_sigmas[:, 0],
+                modality_sigmas[:, 1],
+                fusion=self.protein_time_fusion,
+            )
+            t_emb = self.time_cond(self.time_proj(t_base))
+        else:
+            t_emb = self.time_cond(self.time_proj(self.time_fn(sigma)))
+
+        if protein_call and (
+            self.protein_residue_pos is not None
+            or self.protein_global_cond is not None
+        ):
+            if residue_mask is not None:
+                lengths = residue_mask.to(torch.float32).sum(dim=1)
+            elif slot_state is not None:
+                lengths = torch.full(
+                    (b,),
+                    float(slot_state.shape[1]),
+                    device=tokens.device,
+                    dtype=torch.float32,
+                )
+            else:
+                lengths = torch.full(
+                    (b,), float(n), device=tokens.device, dtype=torch.float32
+                )
+            if self.protein_residue_pos is not None:
+                tokens = tokens + self.protein_residue_pos(
+                    n, lengths, tokens.device, tokens.dtype
+                )
+            if self.protein_global_cond is not None:
+                t_emb = t_emb + self.protein_global_cond(
+                    lengths, slot_state, t_emb.dtype
+                )
         attn_bias = None if self.rpb is None else self.rpb(n, device=tokens.device, dtype=tokens.dtype)
 
         for blk in self.blocks:
@@ -1116,6 +1254,9 @@ class SequenceVDTContinuousModel(nn.Module):
                 tokens = blk(tokens, t_emb, key_padding_mask=pad_mask_tokens, attn_bias=attn_bias)
             else:
                 tokens = blk(tokens, key_padding_mask=pad_mask_tokens, attn_bias=attn_bias)
+
+        if self.final_norm is not None:
+            tokens = self.final_norm(tokens)
 
         if self.head_type == "patch_bits_sedd":
             b2, n2, _ = tokens.shape

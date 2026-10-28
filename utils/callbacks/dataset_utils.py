@@ -37,6 +37,13 @@ def is_text_dataset(trainer) -> bool:
     return bool(extract_dataset_attr(ds, "is_text_dataset"))
 
 
+def is_text_audio_dataset(trainer) -> bool:
+    ds_name = norm_ds(getattr(trainer.cfg.data, "dataset", ""))
+    if ds_name == 'libri':
+        return True
+    ds = trainer.train_loader.dataset
+    return bool(extract_dataset_attr(ds, 'is_text_audio_dataset'))
+
 def seqs_to_images(seqs: torch.Tensor, trainer) -> torch.Tensor:
     ds = trainer.train_loader.dataset
 

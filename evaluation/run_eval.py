@@ -42,9 +42,15 @@ from evaluation.evaluation_drivers.likelihood import evaluate_likelihood
 from evaluation.evaluation_drivers.vlb import evaluate_vlb
 from evaluation.evaluation_drivers.external_ppl import evaluate_external_ppl
 from evaluation.evaluation_drivers.fid_sweep import evaluate_fid_sweep
-from evaluation.evaluation_drivers.fid import evaluate_fid
+try:
+    from evaluation.evaluation_drivers.fid import evaluate_fid
+except ImportError:
+    evaluate_fid = None  # optional dep (pytorch_fid); only needed for --metrics fid
 from evaluation.evaluation_drivers.mauve import evaluate_mauve
 from evaluation.evaluation_drivers.generate_samples import evaluate_generate_samples
+from evaluation.evaluation_drivers.text_audio.generate import evaluate_textaudio_generate
+from evaluation.evaluation_drivers.mnist_sum.eval import evaluate_mnist_sum
+from evaluation.evaluation_drivers.proteins.eval import evaluate_proteins
 
 
 # -----------------------------------------------------------------------------
@@ -56,7 +62,7 @@ def main():
 
     ap.add_argument(
         "--metrics", nargs="+", default=["bpc"],
-        choices=["bpc", "bpd", "fid", "fid_sweep", "vlb", "external_ppl", "external_bpc", "external_bpt", "mauve", "generate_samples"],
+        choices=["bpc", "bpd", "fid", "fid_sweep", "vlb", "external_ppl", "external_bpc", "external_bpt", "mauve", "generate_samples", "textaudio_generate", "mnist_sum", "proteins"],
         help="Which metrics to compute",
     )
 
@@ -114,8 +120,54 @@ def main():
     ap.add_argument("--generate_samples_seed", type=int, default=None)
     ap.add_argument("--generate_samples_sigma_max", type=str, default=None)  # pass "none" to unset
 
+    # Domain-specific offline protocols. These remain available through their
+    # original scripts; the options below expose them from this unified entry
+    # point as well.
+    ap.add_argument("--mnist_sum_checkpoint", type=Path, default=None)
+    ap.add_argument("--mnist_sum_out", type=Path, default=None)
+    ap.add_argument("--mnist_sum_n", type=int, default=None)
+    ap.add_argument("--mnist_sum_n_joint", type=int, default=None)
+    ap.add_argument("--mnist_sum_micro_batch_size", type=int, default=None)
+    ap.add_argument("--mnist_sum_classifier_path", type=Path, default=None)
+    ap.add_argument(
+        "--mnist_sum_skip", nargs="*", choices=["i2t", "t2i", "joint"]
+    )
+    ap.add_argument("--mnist_sum_no_compile", action="store_true")
+    ap.add_argument("--mnist_sum_fp32", action="store_true")
+    ap.add_argument("--mnist_sum_allow_karras", action="store_true")
+
+    ap.add_argument(
+        "--protein_tasks",
+        nargs="+",
+        choices=["entropy", "inverse", "forward", "cogeneration"],
+        default=None,
+    )
+    ap.add_argument("--protein_checkpoint", type=Path, default=None)
+    ap.add_argument("--protein_out_dir", type=Path, default=None)
+    ap.add_argument("--protein_device", default=None)
+    ap.add_argument("--protein_resume", action="store_true")
+
     args = ap.parse_args()
     cfg = load_config(args.config)
+
+    # These paper-grade protocols own their model loading, auxiliary models,
+    # and output manifests. Dispatch them before the generic loader path so a
+    # checkpoint is loaded only once and their original CLIs remain usable.
+    standalone_metrics = [
+        metric for metric in args.metrics if metric in {"mnist_sum", "proteins"}
+    ]
+    if standalone_metrics:
+        if len(standalone_metrics) != len(args.metrics):
+            ap.error(
+                "mnist_sum/proteins cannot be combined with generic metrics "
+                "in one invocation"
+            )
+        for metric in standalone_metrics:
+            if metric == "mnist_sum":
+                evaluate_mnist_sum(args, cfg)
+            else:
+                evaluate_proteins(args, cfg)
+        return
 
     # --- Compilation Settings Logic ---
     # Priority: 1. CLI args -> 2. cfg.evaluation.use_compile -> 3. cfg.train.use_compile
@@ -287,6 +339,9 @@ def main():
         evaluate_generate_samples(
             args, cfg, model, ema, use_ema, test_loader, device, rank0, ddp_active, run_meta, is_text_dataset
         )
+
+    if "textaudio_generate" in args.metrics:
+        evaluate_textaudio_generate(args, cfg, model, device, rank0, ddp_active, dist_info)
 
     # Finalize writes
     barrier()

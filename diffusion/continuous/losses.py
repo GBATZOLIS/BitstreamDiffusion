@@ -572,6 +572,171 @@ def binary_score_interpolation_loss(
     return mean_loss, entropy_metric
 
 
+def multimodal_bit_loss(
+    logits: torch.Tensor,  # [B, S, 1] or [B, S]
+    x0: torch.Tensor,  # [B, S] target bits
+    sigma_map: torch.Tensor,  # [B, S] per-bit noise level (0 at non-targets)
+    cfg,
+    seq_target_mask: torch.Tensor,  # [B, S] bool/float, sequence target bits
+    # [B, S] bool/float, structure target bits
+    struct_target_mask: torch.Tensor,
+    lambda_seq: float = 1.0,
+    lambda_struct: float = 1.0,
+    global_normalizer: bool = False,
+):
+    """
+    Equal-modality denoising loss for the 18-bit patch (plan section
+    6.3).
+    """
+    if logits.dim() == 3:
+        if logits.size(-1) != 1:
+            raise ValueError(
+                f"Expected logits last dim = 1 if 3D, got "
+                f"{tuple(logits.shape)}"
+            )
+        logits = logits.squeeze(-1)
+    elif logits.dim() != 2:
+        raise ValueError(
+            f"Expected logits dim 2 or 3, got {tuple(logits.shape)}"
+        )
+
+    target = x0.to(torch.float32)
+    logits_f32 = logits.to(torch.float32)
+    loss_type = str(getattr(cfg.train, "loss_type", "binary_ce")).lower()
+    if loss_type == "binary_sm":
+        per_pos = (torch.sigmoid(logits_f32) - target) ** 2
+    elif loss_type == "binary_ce":
+        per_pos = F.binary_cross_entropy_with_logits(
+            logits_f32, target, reduction="none"
+        )
+    else:
+        raise ValueError(f"Unknown loss_type '{loss_type}'")
+
+    sigma2 = sigma_map.to(torch.float32) ** 2
+    weighting = str(getattr(cfg.train, "loss_weighting", "edm")).lower()
+    sd2 = float(cfg.diffusion.continuous.sigma_data) ** 2
+    if weighting in {"none", "unit", "1"}:
+        weight = torch.ones_like(sigma2)
+    else:
+        positive = sigma2 > 0
+        safe = torch.where(positive, sigma2, torch.ones_like(sigma2))
+        weight = (safe + sd2) / (safe * sd2)
+        weight = torch.where(positive, weight, torch.zeros_like(weight))
+
+    seq_m = seq_target_mask.to(torch.float32)
+    struct_m = struct_target_mask.to(torch.float32)
+
+    distributed = False
+    if global_normalizer:
+        try:
+            import torch.distributed as dist
+
+            distributed = dist.is_available() and dist.is_initialized()
+        except Exception:
+            distributed = False
+
+    # Optional 1B protocol: make an example carrying two active
+    # modalities contribute the same total mass as an example carrying
+    # one. Without this, a joint co-generation example is implicitly
+    # worth two forward/inverse examples even when the configured task
+    # probabilities are equal.
+    normalize_examples = bool(
+        getattr(cfg.train, "normalize_active_modalities_per_example", False)
+    )
+    seq_num_by_example = (weight * per_pos * seq_m).sum(dim=1)
+    struct_num_by_example = (weight * per_pos * struct_m).sum(dim=1)
+    seq_den_by_example = seq_m.sum(dim=1)
+    struct_den_by_example = struct_m.sum(dim=1)
+    active_seq = seq_den_by_example > 0
+    active_struct = struct_den_by_example > 0
+    active_examples = active_seq | active_struct
+
+    if distributed:
+        import torch.distributed as dist
+
+        # One all-reduce for all four scalars keeps this to a single
+        # collective on the hot path.
+        stats = torch.stack(
+            [
+                (weight * per_pos * seq_m).sum(),
+                seq_m.sum(),
+                (weight * per_pos * struct_m).sum(),
+                struct_m.sum(),
+                active_examples.to(torch.float32).sum(),
+            ]
+        )
+        # The gradient must flow through the *local* numerator only: DDP
+        # already averages gradients across ranks, so all-reducing the
+        # numerator inside the graph would double-count. Reduce a
+        # detached copy to get the global denominators and the global
+        # numerator scale, then rebuild the loss from the local
+        # numerator over the global denominator.
+        with torch.no_grad():
+            reduced = stats.detach().clone()
+            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            world = dist.get_world_size()
+        seq_den = reduced[1].clamp_min(1.0)
+        struct_den = reduced[3].clamp_min(1.0)
+        loss_seq = (weight * per_pos * seq_m).sum() * (world / seq_den)
+        loss_struct = (weight * per_pos * struct_m).sum() * (
+            world / struct_den
+        )
+    else:
+
+        def _reduce(m):
+            num = (weight * per_pos * m).sum()
+            den = m.sum().clamp_min(1.0)
+            return num / den
+
+        loss_seq = _reduce(seq_m)
+        loss_struct = _reduce(struct_m)
+
+    if normalize_examples:
+        per_example_seq = seq_num_by_example / seq_den_by_example.clamp_min(
+            1.0
+        )
+        per_example_struct = (
+            struct_num_by_example / struct_den_by_example.clamp_min(1.0)
+        )
+        modality_weight = (
+            lambda_seq * active_seq.to(torch.float32)
+            + lambda_struct * active_struct.to(torch.float32)
+        ).clamp_min(1.0)
+        per_example = (
+            lambda_seq * per_example_seq * active_seq
+            + lambda_struct * per_example_struct * active_struct
+        ) / modality_weight
+        local_total = (per_example * active_examples).sum()
+        if distributed:
+            total = local_total * (world / reduced[4].clamp_min(1.0))
+        else:
+            total = local_total / active_examples.sum().clamp_min(1)
+    else:
+        total = lambda_seq * loss_seq + lambda_struct * loss_struct
+
+    with torch.no_grad():
+        pred = (logits_f32 > 0).to(torch.float32)
+        correct = (pred == target).to(torch.float32)
+        seq_acc = (correct * seq_m).sum() / seq_m.sum().clamp_min(1.0)
+        struct_acc = (correct * struct_m).sum() / struct_m.sum().clamp_min(1.0)
+
+    components = {
+        "loss_seq": loss_seq.detach(),
+        "loss_struct": loss_struct.detach(),
+        "seq_bit_acc": seq_acc.detach(),
+        "struct_bit_acc": struct_acc.detach(),
+        "seq_target_bits": seq_m.sum().detach(),
+        "struct_target_bits": struct_m.sum().detach(),
+        "active_examples": active_examples.sum().detach(),
+        "task_normalization_per_example": torch.as_tensor(
+            float(normalize_examples), device=logits.device
+        ),
+    }
+    return total, components
+
+
+
+
 def token_score_interpolation_loss(
     logits: torch.Tensor,
     x0: torch.Tensor,

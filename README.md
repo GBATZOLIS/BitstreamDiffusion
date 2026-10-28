@@ -1,148 +1,68 @@
-# CoBit: Language Modeling with Bitstream Diffusion
+# CoBit - Continuous Bitstream Diffusion
 
-Official implementation of the paper:
+Every modality is written as **bits**. The same input projection, transformer trunk, bitwise prediction head and binary score-matching objective serves all of them The denoiser is modality agnostic, both at training and inference time. Modality-specific design is only needed for tokenization and the input sequence structure.
 
-> **CoBit: Language Modeling with Bitstream Diffusion**
-> Georgios Batzolis, Mark Girolami, Luca Ambrogioni
-> *arXiv preprint, 2026.* — [arXiv:2605.07013](https://arxiv.org/abs/2605.07013)
+**Check out our [demo](https://georgekontos14.github.io/MultimodalCobitDemo/)**
 
-We model text as a continuous diffusion process over fixed-width binary bitstreams. Semantic tokens are encoded as analog bit sequences; a matched-filter residual parameterization isolates contextual learning from analytic independent-bit posteriors; and an entropy-rate-gated stochastic sampler concentrates Langevin-type corrections in information-active noise regions. The resulting 130M-parameter model (**CoBit-S**) reaches GenPPL = **59.76** at matched real-data entropy on LM1B and GenPPL = **27.06** at entropy 5.26 on OpenWebText, both at 256 NFEs. Scaling to 462M (**CoBit-M**) reaches GenPPL = **19.48** at entropy 5.40 (256 NFE) and **9.87** at entropy 5.25 (512 NFE) on OpenWebText.
+This repository contains official implementations of the following papers:
 
----
+| Paper | Scope | arXiv
+|---|---|---|
+| **Multimodal Co-Generation with Continuous Bitstram Diffusion** | image+text<br>audio+text<br>protein sequence+structure | [arXiv:2610.14349](https://arxiv.org/abs/2610.14349) | 
+| **CoBit: Language Modeling with Bitstream Diffusion** | LM1B, OpenWebText | [arXiv:2605.07013](https://arxiv.org/abs/2605.07013)
 
-## Headline results
+Additional language modeling documentation: [docs/README_language_modeling.md](docs/README_language_modeling.md)
 
-### CoBit-S (130M) — Table 1
-
-All rows below come from a single 130M-parameter SDT trunk per dataset; only the sampler differs. Both models use the matched-filter residual parameterization, binary score matching with EDM weighting, and an entropy-rate noise schedule. See the paper for details.
-
-| Dataset | Sampler | NFE | GenPPL ↓ | Entropy | Reproduces |
-|---|---|---|---|---|---|
-| LM1B real data | — | — | 53.06 | 4.31 | reference |
-| LM1B | Deterministic (probability flow) | 256 | 82.90 ± 1.11 | 4.30 | Table 1 |
-| LM1B | **Stochastic (γ=0.200, full band)** | 256 | **59.76 ± 0.57** | **4.31** | Table 1 |
-| OWT real data | — | — | 15.06 | 5.44 | reference |
-| OWT | Deterministic (probability flow) | 256 | 46.32 ± 0.93 | 5.13 | Table 1 |
-| OWT | **Stochastic (γ=0.130, full band)** | 256 | **27.06 ± 0.57** | **5.26** | Table 1 (headline) |
-| OWT | Stochastic (γ=0.180, full band) | 256 | 34.35 | 5.32 | §4.2 / Table 14 (high-entropy) |
-
-### CoBit-M (462M) — Table 2 (OpenWebText scaling)
-
-Scaling the same recipe to a 462M SDT trunk (`embed_dim 1024`, `n_blocks 24`,
-`n_heads 16`) moves the GenPPL–entropy frontier substantially. All rows are the
-EMA `step=000750000` checkpoint under the entropy-rate stochastic sampler;
-only the NFE budget / churn differs. Real OWT reference: GenPPL 15.07, entropy 5.44.
-
-| Sampler | NFE | γ | GenPPL ↓ | Entropy | Reproduces |
-|---|---|---|---|---|---|
-| **Stochastic (full band)** | 256 | 0.21 | **19.48** | 5.40 | Table 2 (plotted near-real-entropy point) |
-| Stochastic (full band) | 256 | 0.13 | 18.47 | 5.378 | Table 2 caption (low-perplexity 256-NFE point) |
-| Stochastic (full band) | 384 | 0.24 | 13.06 | 5.33 | Table 2 |
-| **Stochastic (full band)** | 512 | 0.26 | **9.87** | 5.25 | Table 2 |
-
-Reproduce every row in one run with [`configs/owt/eval_cobit_m_750K.py`](configs/owt/eval_cobit_m_750K.py) (see [Step 3](#step-3--evaluate)).
+A single checkpoint per modality pair performs **joint generation and every
+conditional direction it was trained on** — you change which bits are observed,
+not which model you load.
 
 ---
 
-## Repository layout
+## Released Checkpoints
+
+**Multimodal checkpoints**
+
+| Experiment | Model | Params | Directions from one checkpoint | Status |
+|---|---|---|---|---|
+| **image+text** (MNIST-Sum) | `mnist_sum_p28_12x512` | 63.0M | image→text, text→image, joint | **released** |
+| **speech+text** | CoBit-LibriTTS | 134M | TTS, ASR, continuation, joint | **released** |
+| **speech+text** | CoBit-MLS | 633M | TTS, ASR, continuation, joint | **released** |
+| protein sequence+structure | — | 396M | forward folding, inverse folding, joint | *to be added* |
+
+All artifacts live in one Google Drive folder, organised as
+`<modality-pair>/<run-name>/`:
+
+> **[CoBit released checkpoints](https://drive.google.com/drive/folders/1-6RPouCc-xJnE_6h6PT-l2GO_Eputx-o)**
+
+Each run directory has the same shape, and the layout is not cosmetic — the
+sampler resolves the entropy tables **relative to the checkpoint**, so the files
+must stay together:
 
 ```
-BitstreamDiffusion/
-├── train.py                       # entry point for training (DDP via torchrun)
-├── trainers/                      # training loop + checkpointing
-├── models/
-│   ├── sdt.py                     # Sequence Diffusion Transformer (the model)
-│   ├── sedd_wrapper.py            # SEDD baseline wrapper
-│   ├── autoregressive/            # AR Transformer baseline
-│   └── backbones/                 # SEDD backbones
-├── diffusion/
-│   ├── continuous/                # VE forward, score loss, DDIM/Heun samplers
-│   └── discrete/                  # SEDD-style absorbing diffusion (baselines)
-├── data/
-│   ├── lm1b.py                    # LM1B dataset + bit packing
-│   └── openwebtext.py             # OWT dataset + 16-bit codec
-├── evaluation/                    # GenPPL, MAUVE, VLB, entropy estimators
-├── utils/                         # EMA, ECC, optim, callbacks, text decoders
-├── configs/
-│   ├── lm1b/continuous/
-│   │   ├── rate_bits_1M_edm_weight.py            # training
-│   │   └── eval/rate_eval_seeds.py               # evaluation (Table 1)
-│   └── owt/
-│       ├── rate_bits_edm_weight.py                      # CoBit-S training (130M)
-│       ├── eval_750K_seed.py                            # CoBit-S eval (Table 1 + high-entropy)
-│       ├── rate_bits_edm_weight_medium_24x1024.py       # CoBit-M training (462M)
-│       └── eval_cobit_m_750K.py                         # CoBit-M eval (Table 2)
-└── scripts/
-    ├── lm1b/                      # LM1B download + cache + semantic map
-    ├── owt/                       # OWT codec training + cache prebuild
-    ├── profile_*.py               # efficiency benchmarks (Table 2)
-    ├── smoketest_lm1b.sh          # one-seed reproducibility check (SLURM)
-    └── smoketest_owt.sh
+<run-name>/
+├── checkpoints/            # the evaluated checkpoint
+├── config.json             # resolved config as trained
+├── original_config.py      # the config file as written
+├── entropy_{pdf,cdf,sigmas,edges}.pt   # entropy-rate schedule  <-- required
+├── training_logs.zip       # TensorBoard event files
+└── evaluation/             # the results.json behind the paper table
 ```
 
----
-
-## Installation
-
-Tested with Python 3.10 and CUDA 12.x. We recommend a fresh conda environment.
-
-```bash
-conda create -n bitstream python=3.10 -y
-conda activate bitstream
-
-# IMPORTANT: use `python -m pip ...` rather than bare `pip ...`. On many
-# clusters the `pip` shim resolves to the system Python instead of the
-# conda one, silently installing everything into the wrong interpreter.
-# Confirm with: `which python && python -m pip --version`.
-
-# PyTorch — pick the build matching your CUDA toolkit
-# (replace cu121 with your CUDA version; see https://pytorch.org/get-started)
-python -m pip install torch==2.4.* --index-url https://download.pytorch.org/whl/cu121
-
-# Project dependencies
-python -m pip install -r requirements.txt
-
-# Optional: FlashAttention 2 for ~30% faster training/sampling.
-# Skip this if your hardware / toolchain makes the build painful — the
-# code transparently falls back to SDPA (see note below).
-python -m pip install flash-attn --no-build-isolation
-```
-
-`flash_attn` is genuinely optional: the import is guarded and the attention
-layer transparently falls back to `torch.nn.functional.scaled_dot_product_attention`
-([models/backbones/official_sedd.py](models/backbones/official_sedd.py)) if
-the package is not installed.
-
-The image-FID dependency `pytorch-fid` is **not** installed by default — its
-pinned `torchvision` requirement conflicts with the `torch==2.4.*` build we
-recommend, and it is only used for an unrelated image-FID evaluator that the
-text experiments in this paper never invoke. If you need it, install it
-separately:
-
-```bash
-python -m pip install pytorch-fid
-```
-
----
-
-## Quick start: reproducing the paper
-
-The fastest path is to download the released checkpoints and pre-built dataset caches, then run the evaluation configs. Total reviewer time: ~1.5h on a single H100/GH200 for LM1B and ~2.5h for OWT.
-
-### Step 1 — Download released artifacts
+**Language checkpoints**
 
 We release the trained checkpoints and the OWT second-stage code tokenizer on
 the [Hugging Face Hub](https://huggingface.co/gbatzolis/CoBit). All checkpoints
 are **EMA weights** — evaluate them with the default settings (the eval configs
 load them with `apply_ema=True`, which is a no-op on these baked weights).
 
-| Artifact | Model | Size | Destination |
-|---|---|---|---|
-| `checkpoints/cobit_s_lm1b_1M_ema.pt`   | CoBit-S LM1B (1M)   | 0.53 GB | `runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt` |
-| `checkpoints/cobit_s_owt_750k_ema.pt`  | CoBit-S OWT (750K)  | 0.54 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` |
-| `checkpoints/cobit_m_owt_750k_ema.pt`  | **CoBit-M OWT (750K)** | 1.85 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_medium_24x1024/checkpoints/step=000750000.pt` |
-| `tokenizer/…_base1024.json` + `.meta.json` | OWT 16-bit code tokenizer | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/` |
-| `entropy_tables/{lm1b,owt,owt_medium}/…` | entropy-rate schedules | ~7 KB ea. | `assets/entropy_tables/` (also ships in this repo) |
+|Experiment | Model | Artifact | Params/Size | Destination
+|---|---|---|---|---|
+| LM1B | CoBit-S (1M) | `checkpoints/cobit_s_lm1b_1M_ema.pt` | 134M / 0.53 GB | `runs/paper/unconditional_text/lm1b/continuous_rate_raw_binary_bits_1M_edm_weighting/checkpoints/step=001000000.pt` |
+| OWT | CoBit-S (750K) | `checkpoints/cobit_s_owt_750k_ema.pt` | 134M / 0.54 GB |  `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_1M/checkpoints/step=000750000.pt` |
+| OWT | CoBit-M (750K) | `checkpoints/cobit_m_owt_750k_ema.pt` | 462M / 1.85 GB | `runs/paper/unconditional_text/owt/continuous_rate_raw_binary_bits_medium_24x1024/checkpoints/step=000750000.pt` |
+| OWT | 16-bit code tokenizer | `tokenizer/…_base1024.json` + `.meta.json` | 2.2 MB | `datasets/openwebtext_gpt2_trainm100k/` |
+| --- | entropy-rate schedules | `entropy_tables/{lm1b,owt,owt_medium}/…` | ~7 KB ea. | `assets/entropy_tables/` (also ships in this repo) |
 
 #### One-shot download (places files in the exact expected paths)
 
@@ -162,287 +82,370 @@ entropy-rate tables already ship in this repository under
 [`assets/entropy_tables/`](assets/entropy_tables/), so they are not fetched by
 default (pass `--entropy-tables` to restore them if you deleted the in-repo copy).
 
-#### A note on the entropy schedule artefacts
-
-The entropy-rate noise schedule used in the paper (Eq. 13, Figure 4) is
-**dataset-specific** — the LM1B and OWT models were trained with different
-entropy profiles, and the sampler needs the matching profile at evaluation
-time. Each profile is four small `.pt` files (~7 KB total per dataset):
-
-```
-entropy_pdf.pt      # bin probabilities of the entropy-rate distribution
-entropy_cdf.pt      # cumulative integral, used by the entropic σ-schedule
-entropy_sigmas.pt   # bin midpoints in σ-space
-entropy_edges.pt    # bin edges in σ-space
-```
-
-These files **ship with the repository** under
-[`assets/entropy_tables/lm1b/`](assets/entropy_tables/lm1b/),
-[`assets/entropy_tables/owt/`](assets/entropy_tables/owt/) (CoBit-S), and
-[`assets/entropy_tables/owt_medium/`](assets/entropy_tables/owt_medium/)
-(CoBit-M), and every eval config references the matching path via
-`cfg.evaluation.entropy_run_dir`. The CoBit-M profile is **distinct** from the
-CoBit-S OWT profile — the 462M model was trained with its own entropy-rate
-schedule, so `eval_cobit_m_750K.py` points at `owt_medium`, not `owt`. There's
-normally nothing to download; the Hub copy is a redundant mirror.
-
-> ⚠️  If the entropy tables for the requested dataset are missing, the
-> sampler **hard-errors** rather than silently falling back to a Karras
-> schedule. The Karras fallback typically degrades GenPPL by 30–40 points
-> on LM1B (see Figure 4 in the paper appendix).
-
-If you train your own model with `train.py`, the trainer writes its own
-`entropy_{pdf,cdf,sigmas,edges}.pt` into the training `run_dir`. To
-evaluate that model rather than the released checkpoint, edit your eval
-config and either remove the `cfg.evaluation.entropy_run_dir` line
-(default: derived from `cfg.evaluation.checkpoint_path`) or set it to
-your training run directory.
-
-### Step 2 — Prepare datasets
-
-We do not host the raw dataset caches (they are large and trivially regenerable). Build them from scratch with the scripts below — the resulting layout is exactly what the configs expect, including the OWT tokenizer files you downloaded in Step 1.
-
-Expected on-disk layout once Step 2 completes:
-
-```
-datasets/lm1b/
-  cache_train_tokens.uint16
-  cache_train_tokens.meta.json
-  cache_test_tokens.uint16
-  cache_test_tokens.meta.json
-  train.txt
-  test.txt
-
-datasets/openwebtext_gpt2_trainm100k/
-  cache_train_gpt2_flat_eos1.uint16
-  cache_train_gpt2_flat_eos1.meta.json
-  cache_val_gpt2_flat_eos1.uint16
-  cache_val_gpt2_flat_eos1.meta.json
-  cache_train_gpt2_gpt2id_bpe16_v65536_base1024_len1024.uint16
-  cache_train_gpt2_gpt2id_bpe16_v65536_base1024_len1024.meta.json
-  cache_val_gpt2_gpt2id_bpe16_v65536_base1024_len1024.uint16
-  cache_val_gpt2_gpt2id_bpe16_v65536_base1024_len1024.meta.json
-  tokenizer_gpt2id_bpe16_65536_base1024.json         # from Step 1
-  tokenizer_gpt2id_bpe16_65536_base1024.meta.json    # from Step 1
-```
-
-#### Build the caches
-
-**LM1B** — three steps (≈1h on a single CPU):
-
-```bash
-# (1) Download LM1B and write packed line files
-python -m scripts.lm1b.download_lm1b --out_dir datasets/lm1b
-
-# (2) Build BERT-tokenized fixed-block caches (128 tokens / block)
-python -m scripts.lm1b.build_lm1b_bert_caches \
-  --root datasets/lm1b \
-  --tokenizer_name bert-base-uncased \
-  --seq_len_tokens 128 \
-  --boundary_mode sep
-```
-
-A semantic-map step (`scripts.lm1b.prepare_lm1b_semantic_map`) is also provided for the semantic-bit ablations in the paper, but it is **not required** for the headline `raw_binary` results.
-
-**OpenWebText** — two stages: build the GPT-2 flat cache, then download (recommended) or re-train the 16-bit code tokenizer, then materialize the second-stage cache.
-
-```bash
-# (1) Build the GPT-2 flat token caches (train/val).
-#     This downloads OpenWebText via 🤗 datasets and packs GPT-2 ids contiguously.
-python -m scripts.owt.prebuild_owt_caches \
-  --config configs/owt/rate_bits_edm_weight.py
-
-# (2) Train the second-stage 16-bit code tokenizer (gpt2id_bpe16, |V|=65,536).
-#     SKIP THIS STEP if you downloaded the released tokenizer in Step 1 — it's deterministic
-#     but takes a few hours of CPU time.
-python -m scripts.owt.train_owt_gpt2id_bpe16 \
-  --root datasets/openwebtext_gpt2_trainm100k \
-  --tokenizer_name gpt2 \
-  --base_seq_len_tokens 1024 \
-  --code_vocab_size 65536 \
-  --split_name train
-
-# (3) Re-run prebuild to materialize the gpt2id_bpe16 second-stage cache,
-#     now that the codec is in place.
-python -m scripts.owt.prebuild_owt_caches \
-  --config configs/owt/rate_bits_edm_weight.py
-```
-
-### Step 3 — Evaluate
-
-The evaluation configs already encode the exact sampler settings (NFE = 256, full-band entropy window, S_noise = 1.003, `ati_eta = 0`) used to produce the headline numbers. Each config sweeps the operating points reported in the paper.
-
-```bash
-# Common environment
-export EVAL_SEED=42
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-export TOKENIZERS_PARALLELISM=false
-export HF_HOME="$PWD/hf_cache"
-```
-
-**LM1B (reproduces Table 1, LM1B Stochastic row, γ = 0.200):**
-
-```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=1 \
-  -m evaluation.run_eval \
-  --config configs/lm1b/continuous/eval/rate_eval_seeds.py \
-  --metrics external_ppl
-
-python -m evaluation.compute_entropy_from_caches \
-  --config configs/lm1b/continuous/eval/rate_eval_seeds.py \
-  --include_real
-```
-
-The config also runs a γ = 0.185 spec, which produces a nearby Pareto point.
-Outputs land at `runs/.../lm1b/.../evaluation_cleanup_smoketest/results.{csv,jsonl}`.
-Expected on a single seed: GenPPL ≈ 59–60 at entropy ≈ 4.31 (paper: 59.76 ± 0.57 across 10 seeds).
-
-**OWT (reproduces Table 1 OWT Stochastic + the §4.2 high-entropy point):**
-
-```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=1 \
-  -m evaluation.run_eval \
-  --config configs/owt/eval_750K_seed.py \
-  --metrics external_ppl
-
-python -m evaluation.compute_entropy_from_caches \
-  --config configs/owt/eval_750K_seed.py \
-  --include_real
-```
-
-This sweeps three operating points in a single run:
-
-| γ | NFE | Reproduces | Expected (single seed) |
-|---|---|---|---|
-| 0.130 | 256 | Table 1 OWT Stochastic | GenPPL ≈ 27, entropy ≈ 5.26 |
-| 0.175 | 256 | Frontier point | GenPPL ≈ 34, entropy ≈ 5.31 |
-| 0.180 | 256 | §4.2 high-entropy / Table 14 sample | GenPPL ≈ 34, entropy ≈ 5.32 |
-
-**CoBit-M / 462M (reproduces Table 2, OpenWebText scaling):**
-
-```bash
-# All three Table-2 rows (256/384/512 NFE) in one run. Add the low-PPL
-# 256-NFE caption point with EVAL_CELLS=all.
-bash scripts/owt/eval_cobit_m.sh                 # 2 GPUs (default)
-NPROC=1 bash scripts/owt/eval_cobit_m.sh         # single GPU
-EVAL_CELLS=all bash scripts/owt/eval_cobit_m.sh  # + the γ=0.13 caption point
-```
-
-The launcher runs generation + GenPPL and then the post-hoc token-unigram
-entropy estimator. Equivalent explicit form:
-
-```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=2 \
-  -m evaluation.run_eval --config configs/owt/eval_cobit_m_750K.py --metrics external_ppl
-python -m evaluation.compute_entropy_from_caches --config configs/owt/eval_cobit_m_750K.py
-```
-
-This sweeps the Table-2 operating points in a single run (`EVAL_CELLS=table2`):
-
-| γ | NFE | Reproduces | Expected (single seed) |
-|---|---|---|---|
-| 0.21 | 256 | Table 2 (plotted point) | GenPPL ≈ 19.5, entropy ≈ 5.40 |
-| 0.24 | 384 | Table 2 | GenPPL ≈ 13.1, entropy ≈ 5.33 |
-| 0.26 | 512 | Table 2 | GenPPL ≈ 9.9, entropy ≈ 5.25 |
-| 0.13 | 256 | Table 2 caption (low-PPL) | GenPPL ≈ 18.5, entropy ≈ 5.38 |
-
-Outputs land at `runs/.../continuous_rate_raw_binary_bits_medium_24x1024/evaluation_cobit_m_table2_step000750000/results.{csv,jsonl}`. GenPPL agrees with the paper to within seed/hardware noise (Table-1-style ±0.5).
-
-#### Multi-seed evaluation
-
-The paper reports mean ± std across 10 seeds. To replicate, loop the seed:
-
-```bash
-for s in {42..51}; do
-  EVAL_SEED=$s torchrun --standalone --nnodes=1 --nproc_per_node=1 \
-    -m evaluation.run_eval \
-    --config configs/owt/eval_750K_seed.py \
-    --metrics external_ppl
-done
-python -m evaluation.compute_entropy_from_caches \
-  --config configs/owt/eval_750K_seed.py --include_real
-```
-
-Provided SLURM templates [`scripts/smoketest_lm1b.sh`](scripts/smoketest_lm1b.sh) and [`scripts/smoketest_owt.sh`](scripts/smoketest_owt.sh) demonstrate the single-seed run on a 1-GPU partition.
+> ⚠️ **The entropy tables are not optional.** The entropy-rate noise schedule is
+> estimated online *per run*, and the sampler needs that run's profile. If they
+> are missing, this codebase **raises** rather than silently falling back to a
+> Karras grid. Do not work around it: on the text models the fallback costs
+> 30–40 GenPPL, and on MNIST-Sum it makes every number incomparable.
 
 ---
 
-## Training from scratch
-
-The CoBit-S training configs implement the exact protocol described in Appendix B of the paper: 12-block / 768-d SDT trunk, AdamW (lr = 3 × 10⁻⁴, cosine decay, 2.5K warmup), global batch size 512, BF16, EDM loss weighting, entropy-rate noise schedule with 40K-step warmup and 10K-step transition, self-conditioning probability 0.5 with carry-mode at sampling. CoBit-M keeps this protocol unchanged except for the trunk (1024-d / 24 blocks / 16 heads), a more conservative lr = 2 × 10⁻⁴ and 5K warmup at the larger scale.
-
-The hardware below matches what we actually used to produce the released checkpoints. Other configurations (more or fewer GPUs) work identically as long as the per-step global batch size stays at 512 — the trainer divides the global batch evenly across the world size.
+## Installation
 
 ```bash
-# LM1B — 1,000,000 optimizer steps. ~2 days on 2 × NVIDIA GH200, global batch 512.
-torchrun --standalone --nnodes=1 --nproc_per_node=2 \
-  train.py --config configs/lm1b/continuous/rate_bits_1M_edm_weight.py
+conda create -n bitstream python=3.11 -y
+conda activate bitstream
 
-# OpenWebText — CoBit-S (130M). ~6 days on 4 × NVIDIA GH200, global batch 512.
-# Paper-reported numbers use the step=000750000.pt checkpoint; training continues to 1M.
-torchrun --standalone --nnodes=1 --nproc_per_node=4 \
-  train.py --config configs/owt/rate_bits_edm_weight.py
+# Confirm that pip belongs to the activated interpreter.
+which python
+python -m pip --version
 
-# OpenWebText — CoBit-M (462M, Table 2). 2 × GH200 nodes (8 GPUs), global batch 512.
-# Same recipe; only the trunk grows (1024-d / 24 blocks / 16 heads) and lr 2e-4 / warmup 5K.
-# Table-2 numbers use the step=000750000.pt checkpoint.
-torchrun --standalone --nnodes=1 --nproc_per_node=8 \
-  train.py --config configs/owt/rate_bits_edm_weight_medium_24x1024.py
+# Core training environment.
+./setup.sh train
 ```
 
-Checkpoints are written every 50,000 steps (and a rolling `last.pt` every 5,000 steps for resume) to `runs/<cfg.experiment>/checkpoints/`. Training auto-resumes from `last.pt` if the run directory already exists.
+| Profile | Command | Additional dependencies |
+|---|---|---|
+| Core training | `./setup.sh train` | Base training stack |
+| Text-only | `./setup.sh text` | Gensim and text evaluation |
+| MNIST-Sum | `./setup.sh mnist-sum` | Released-artifact downloader |
+| Text-audio | `./setup.sh text-audio` | Torchaudio and audio evaluation stack |
+| Protein training | `./setup.sh protein` | Base training stack |
+| Protein evaluation | `./setup.sh protein-eval` | Folding and structural metrics; downloads evaluator models |
+| Development | `./setup.sh dev` | All profiles, pytest and Ruff |
 
-Multi-node DDP is supported via standard `torchrun` flags (`--nnodes`, `--nproc_per_node`, `--rdzv_endpoint`, etc.). The trainer initializes `nccl` with a 20-minute timeout.
+To target a different official PyTorch wheel index, set
+`PYTORCH_INDEX_URL` before running the script. For example:
+
+```bash
+PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 ./setup.sh train
+```
+
+FlashAttention remains optional for the main model and can be installed after
+the selected profile when the CUDA compiler and GPU support it:
+
+```bash
+python -m pip install flash-attn --no-build-isolation
+```
+
+The additional speech-tokenizer and metric packages are installed separately
+when needed:
+
+```bash
+bash scripts/text_audio/textaudio_install.sh
+```
 
 ---
 
-## Configuration files at a glance
+## Multimodal Experiment 1 — image+text (MNIST-Sum)
 
-| File | Purpose |
-|---|---|
-| [`configs/lm1b/continuous/rate_bits_1M_edm_weight.py`](configs/lm1b/continuous/rate_bits_1M_edm_weight.py) | LM1B training (1M steps) |
-| [`configs/lm1b/continuous/eval/rate_eval_seeds.py`](configs/lm1b/continuous/eval/rate_eval_seeds.py) | LM1B evaluation: γ ∈ {0.185, 0.200} stochastic specs |
-| [`configs/owt/rate_bits_edm_weight.py`](configs/owt/rate_bits_edm_weight.py) | CoBit-S OWT training (1M-step schedule; 750K used in paper) |
-| [`configs/owt/eval_750K_seed.py`](configs/owt/eval_750K_seed.py) | CoBit-S OWT evaluation: γ ∈ {0.13, 0.175, 0.18} stochastic specs (Table 1) |
-| [`configs/owt/rate_bits_edm_weight_medium_24x1024.py`](configs/owt/rate_bits_edm_weight_medium_24x1024.py) | CoBit-M OWT training (462M; 750K used in paper) |
-| [`configs/owt/eval_cobit_m_750K.py`](configs/owt/eval_cobit_m_750K.py) | CoBit-M OWT evaluation: 256/384/512-NFE Table-2 operating points |
+A controlled test of the multimodal interface with **no learned tokenizer on
+either side**, so there is no reconstruction floor and every direction has a
+unique correct answer. Four binarised MNIST digits in a 2×2 grid are paired with
+their equation; the model reads and adds a supplied image, draws the four digits
+a supplied equation names, or generates an agreeing pair from noise.
 
-The discrete-diffusion bitstream baseline (Appendix C) is exposed via `configs/lm1b/discrete/`.
+One flat sequence of **3,388 bits** — 3,136 raw pixel bits + 84 text bits
+(7-bit codes, 40 symbols) + 168 marker bits — in 121 positions of 28 bits. The
+denoiser sees that sequence and its 1-D position. No pixel grid, no 2-D
+attention, no modality embedding.
+
+### Reproduce the paper table (~1 GB download, ~50 min on one A6000)
+
+```bash
+# 1. fetch checkpoint + entropy tables + classifier + evaluation corpus
+bash scripts/mnist_sum/fetch_mnist_sum_release.sh
+
+# 2. evaluate — all three directions, n=4,096 per direction per split
+python evaluation/run_eval.py \
+    --config configs/mnist_sum/mnist_sum_p28_small.py \
+    --metrics mnist_sum \
+    --mnist_sum_checkpoint runs/multimodal/mnist_sum_p28_12x512/checkpoints/step=000500000.pt \
+    --mnist_sum_out results/mnist_sum_p28_500k \
+    --mnist_sum_n 4096 --mnist_sum_n_joint 4096
+
+# 3. check every cell against the published intervals
+python scripts/mnist_sum/check_mnist_sum_results.py \
+    results/mnist_sum_p28_500k/results.json
+```
+
+Step 3 prints a pass/fail line per cell and exits non-zero if anything lands
+outside its published 95% interval. It also checks the *protocol* first —
+`karras_fallback`, `n`, step counts, EMA, `torch.compile` and the checkpoint
+step — because a number produced under different settings is not a failed
+reproduction, it is a different measurement.
+
+### Expected result
+
+n=4,096 per direction per split; image→text and text→image at guidance 2.0,
+joint unguided; 95% Wilson intervals.
+
+| Direction | val | held-out |
+|---|---|---|
+| image→text, exact string match | **97.56** [97.04, 97.99] | **97.85** [97.36, 98.25] |
+| text→image, all four digits | **99.95** [99.82, 99.99] | **99.93** [99.78, 99.98] |
+| joint from noise, mutually consistent | **99.46** [99.19, 99.65] | — |
+
+Joint decomposes into 100.00% well-formed equations, 99.71% whose named addends
+match the generated image, and 99.76% whose arithmetic is valid.
+
+### Three things that will silently corrupt this number
+
+1. **Use `step=000500000.pt`, never `best.pt`.** `best.pt` is selected on
+   validation loss, and the entropy-schedule warmup at step 40k raises the loss
+   floor from ~0.086 to ~0.222. No later epoch can beat a pre-warmup loss, so
+   `best.pt` is frozen at ~step 31k — roughly 10 accuracy points below the
+   final model. The fetch script only downloads the right one.
+2. **Do not retrain the quadrant classifier.** `runs/mnist_sum_quadrant_cnn.pt`
+   is the instrument that reads text→image and the image half of joint. Two arms
+   read by two instruments is not a comparison. The offline harness will train
+   one if the file is absent — the fetch script places the released one first.
+3. **Read text→image against the train-pool ceiling of 99.78%, not 96.09%.**
+   The corpus builds val / held-out composites from MNIST's *test* digits while
+   the classifier is fitted on the *train* pool, and generated digits imitate the
+   pool the classifier knows. Both ceilings are in `results.json`; against 96.09
+   the model reads as "104% of ceiling", which is meaningless.
+
+### Train from scratch (~40 h on 2× A6000)
+
+```bash
+# Build the corpus (deterministic, seed 42; downloads MNIST) -- or pass --full
+# to the fetch script to download the exact 1M-example corpus we trained on.
+python scripts/mnist_sum/phase_50_mnist_sum_dataset.py \
+    --out datasets/mnist_sum_p28 --patch_size 28
+
+# 500,000 steps, global batch 512, ~282 ms/step
+torchrun --nproc_per_node=2 train.py \
+    --config configs/mnist_sum/mnist_sum_p28_small.py
+```
+
+The run writes its own `entropy_{pdf,cdf,sigmas,edges}.pt` into the run
+directory from step 2,000 onward; evaluate against *those*, not the released
+ones. Image→text accuracy is logged to TensorBoard under `mnist_sum/` at every
+50k steps and saturates by ~150k.
+
+The config is derived from the CC3M recipe by import-and-override
+([`configs/mnist_sum/_mnist_sum_base.py`](configs/mnist_sum/_mnist_sum_base.py)),
+so everything not listed in its `OVERRIDES` docstring is byte-identical to CC3M
+by construction. The only overrides are data geometry and trunk scale: **nothing
+in `cfg.model.*` is overridden**, so the backbone is the stock one, identical to
+the speech models.
 
 ---
 
-## Sampling specifics
+## Multimodal Experiment 2 — speech+text
 
-Generated samples are produced by:
+Two checkpoints, each performing text→speech, speech→text, speech continuation
+and joint co-generation from one set of weights. Text (o200k), a 32-token
+BiCodec-global speaker representation and StableCodec speech tokens share one
+18-bit word.
 
-1. integrating the probability-flow ODE in Eq. (8) of the paper on the entropy-rate sigma grid (DDIM-style, 256 steps);
-2. interleaving EDM-style stochastic churn (`gamma_target` and `s_noise = 1.003`) over the full entropy band `q ∈ [0, 1]`;
-3. self-conditioning in carry mode;
-4. terminal sigma `σ_term = 0.0794`, `ati_eta = 0`.
+| Model | Config | Trunk | Speech budget | Training |
+|---|---|---|---|---|
+| CoBit-LibriTTS (134M) | [`configs/text_audio/libritts/libritts_train.py`](configs/text_audio/libritts/libritts_train.py) | 12×768 | 800 tokens | LibriTTS, 140K steps |
+| CoBit-MLS (633M) | [`configs/text_audio/mls/mls_train.py`](configs/text_audio/mls/mls_train.py) | 26×1152 | 500 tokens | LibriTTS + MLS-English, 1.2M steps |
 
-Each generation produces 1024 samples per spec. Generative perplexity is computed under `openai-community/gpt2-large`. Token-frequency entropy is computed on `bert-base-uncased` IDs for LM1B and on inverse-decoded GPT-2 IDs for OWT (so entropies are directly comparable to GPT-2-tokenized baselines, not to our intermediate 16-bit code vocabulary).
+### Setup
+
+```bash
+bash setup.sh text-audio
+```
+
+Download `audio+text/cobit-libritts/` or `audio+text/cobit-mls/` from the Drive
+folder and place each run directory under `runs/` at the name its config uses —
+`runs/cobit_libritts/` for CoBit-LibriTTS and `runs/cobit_mls/` for
+CoBit-MLS — keeping `checkpoints/` and the four `entropy_*.pt` files together.
+The evaluation corpora (LibriSpeech-PC, SALMON) are under `audio+text/datasets/`.
+
+### Evaluate
+
+```bash
+python evaluation/run_eval.py \
+    --config configs/text_audio/mls/eval_sweeps/512.py \
+    --metrics textaudio_generate --compile
+```
+
+Per-direction operating points are in Appendix C.1 of the paper: TTS, ASR and
+continuation all use 512 steps (1024 NFE) with guidance 5, at γ = 0.27 / 0.27 /
+0.4 for CoBit-MLS; co-generation uses γ = 0.175 and no guidance. The released
+`evaluation.zip` and `validation.zip` in each run directory contain the
+generations and sweeps behind Tables 2 and 6–23.
+
+> The speech evaluation depends on external judges (Whisper-large, UTMOS,
+> ECAPA-TDNN, WavLM, Emotion2Vec, GPT-4o) — see Appendix C.1. Exact invocation
+> for each metric is being folded into this README; until then, the sweep
+> configurations recorded in the released `validation.zip` are the ground truth
+> for what was run.
+>
+> The per-model evaluation sweeps live in
+> `configs/text_audio/{libritts,mls}/eval_sweeps/`. Select the sweep config whose
+> sampling budget and task set match the evaluation you want to run.
+
+---
+
+## Multimodal Experiment 3 — protein sequence+structure
+
+One checkpoint performs forward folding, inverse folding and joint sequence–
+structure co-generation. Each residue is represented by one 18-bit position:
+5 bits encode the amino-acid sequence token and 13 bits encode the frozen DPLM
+structure token.
+
+| Model | Config | Trunk | Maximum length | Training |
+|---|---|---|---|---|
+| CoBit-Protein (396M) | [`configs/proteins/proteins_400m.py`](configs/proteins/proteins_400m.py) | 20×1024 | 512 residues | Paired PDB/Swiss-Prot + UniRef50 replay, 300K steps |
+
+### Setup and data
+
+Install the training environment, download the frozen structure-tokenizer
+configuration and prepare the training datasets:
+
+```bash
+bash setup.sh protein
+python scripts/proteins/download_config.py
+python scripts/proteins/download_data.py train
+```
+
+The paired sequence–structure examples come from the
+[DPLM PDB/Swiss-Prot dataset](https://huggingface.co/datasets/airkingbd/pdb_swissprot).
+The preparation step also selects 400,000 replay sequences from
+[EvoDiff UniRef50](https://zenodo.org/records/6564798). Prepared data is written
+under `datasets/`.
+
+### Train
+
+The paper configuration uses FP32, an effective batch size of 512 and 300,000
+optimizer steps. The paper run used eight H100 GPUs:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py \
+    --config configs/proteins/proteins_400m.py
+```
+
+Checkpoints, entropy tables and logs are stored under `runs/proteins/paper/`.
+Rerunning the same command resumes from `checkpoints/last.pt` when it exists.
+
+### Evaluate
+
+Install the protein evaluation dependencies and frozen evaluator models, then
+prepare the CATH 4.3 and CAMEO 2022 evaluation data:
+
+```bash
+bash setup.sh protein-eval
+python scripts/proteins/download_data.py eval
+```
+
+Run entropy profiling, inverse folding, forward folding and co-generation from
+the unified evaluation entry point:
+
+```bash
+python evaluation/run_eval.py \
+    --config configs/proteins/proteins_400m.py \
+    --metrics proteins \
+    --protein_checkpoint runs/proteins/paper/checkpoints/best.pt
+```
+
+Entropy profiling runs first on the CATH validation split and writes the
+checkpoint-specific entropy tables beside the run. Inverse folding uses CATH
+test backbones, forward folding uses the CAMEO 2022 targets, and co-generation
+samples lengths 100, 200, 300, 400 and 500. The saved protocol uses 50 sampling
+grid points, guidance 5 for conditional tasks and entropy-windowed churn.
+
+---
+
+## How one model serves every direction
+
+The parts below are shared by all three experiments — this is the whole of the
+multimodal extension.
+
+**Layout.** Each modality is written as bits, directly or through a frozen
+tokenizer, and placed in a fixed sequence template that sets the order, position
+and budget of each segment plus the marker positions. Nothing is learned about
+where a code goes.
+
+**Partial denoising.** Training samples a regime per example and builds a mask
+`M`: observed bits stay clean, `x_σ = x_0 + (1 − M) ⊙ σε`, and the loss is
+applied only to `(1 − M)`. Leaving all content bits unobserved trains joint
+generation; observing one modality trains generation of the other.
+The shared mask contract is in [`utils/regimes.py`](utils/regimes.py). The
+layout-specific implementations are
+[`utils/mnist_sum/utils.py`](utils/mnist_sum/utils.py),
+[`utils/text_audio/utils.py`](utils/text_audio/utils.py), and the protein state
+and dataset logic in [`data/protein_tasks.py`](data/protein_tasks.py) and
+[`data/protein_multimodal.py`](data/protein_multimodal.py).
+
+**Markers are always observed, and never dropped.** Structural marker positions
+stay clean in every regime, and — this is the subtle part — they must keep their
+**true codes in the CFG unconditional branch** rather than being nulled to 1/2,
+which is a value the model never sees in training. That carve-out is
+`protect_mask` in
+[`diffusion/continuous/samplers.py`](diffusion/continuous/samplers.py); without
+it, guided conditional generation degrades with no error raised.
+[`tests/test_protect_mask.py`](tests/test_protect_mask.py) pins the behaviour.
+
+**Unimplemented config flags raise.** `cfg.model.*` keys that nothing reads are
+rejected at model construction
+([`models/__init__.py`](models/__init__.py)). A config that silently asks for a
+component the code does not have is how an architecture claim and a trained
+model come apart.
+
+---
+
+## Repository layout
+
+```
+BitstreamDiffusion/
+├── setup.sh                         # Conda environment profiles
+├── train.py                         # shared training entry point (DDP via torchrun)
+├── trainers/
+│   ├── trainer.py                  # shared training loop
+│   └── multimodal_step.py          # protein sequence–structure training step
+├── models/
+│   ├── sdt.py                      # Sequence Diffusion Transformer
+│   └── protein_multimodal.py       # protein-specific embeddings and conditioning
+├── diffusion/continuous/           # VE process, binary score loss and samplers
+├── data/
+│   ├── mnist_sum/                  # MNIST-Sum dataset and image+text codecs
+│   ├── text_audio/                 # speech+text dataset
+│   ├── protein_multimodal.py       # paired protein dataset
+│   └── protein_tasks.py            # protein regimes and modality masks
+├── configs/
+│   ├── mnist_sum/                  # MNIST-Sum and CC3M
+│   ├── text_audio/                 # CoBit-LibriTTS and CoBit-MLS
+│   ├── proteins/                   # protein sequence+structure
+│   └── text/{lm1b,owt}/            # language modeling
+├── evaluation/
+│   ├── run_eval.py                 # unified evaluation entry point
+│   └── evaluation_drivers/         # MNIST-Sum, text-audio and protein drivers
+├── scripts/{mnist_sum,text_audio,proteins,text}/
+│                                      # preparation and experiment utilities
+├── utils/
+│   ├── regimes.py                  # shared conditioning-plan interface
+│   ├── callbacks/                  # training-time evaluation and generation
+│   └── {mnist_sum,text_audio,proteins}/
+│                                      # experiment-specific utilities
+├── assets/                         # fixed codecs and evaluation assets
+└── docs/                           # experiment reports and language-modeling guide
+```
 
 ---
 
 ## Citation
 
 ```bibtex
-@misc{batzolis2026bitstream,
-  title         = {CoBit: Language Modeling with Bitstream Diffusion},
-  author        = {Batzolis, Georgios and Girolami, Mark and Ambrogioni, Luca},
-  year          = {2026},
-  eprint        = {2605.07013},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.LG}
+@article{multimodalcobit2026,
+  title   = {Multimodal Co-Generation With Continuous Bitstream Diffusion},
+  author  = {Batzolis, Georgios and Kontos, Georgios and Trentini, Bruno and Chatterjee, Pranam and Livne, Micha and Girolami, Mark and Ambrogioni, Luca},
+  journal = {arXiv preprint arXiv:2610.14349},
+  year    = {2026}
 }
 ```
 
----
+```bibtex
+@article{cobit2026,
+  title  = {CoBit: Language Modeling with Bitstream Diffusion},
+  author = {Batzolis, Georgios and Girolami, Mark and Ambrogioni, Luca},
+  journal = {arXiv preprint arXiv:2605.07013},
+  year   = {2026}
+}
+```
 
-## Acknowledgements
-
-This codebase builds on ideas and reference implementations from EDM (Karras et al., 2022), Analog Bits (Chen et al., 2022), SEDD (Lou et al., 2024), CDCD (Dieleman et al., 2022), and the FLM / LangFlow continuous-DLM family. We thank the authors of these works for making their code and analyses public.
-
-## License
-
-Released under the MIT License. See [`LICENSE`](LICENSE) for the full text.

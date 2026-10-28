@@ -33,7 +33,7 @@ def compute_nfe(
                 nfe += 1
             return nfe
 
-        if s in {"ddim", "ddim_karras", "ddim_entropic", "entropic", "euler"}:
+        if s in {"ddim", "ddim_karras", "ddim_entropic", "entropic", "euler", "euler_maruyama"}:
             nfe = steps if not self_condition else ((2 if sc_refresh_mode == "refined" else 1) * steps)
             if return_probs:
                 nfe += 1

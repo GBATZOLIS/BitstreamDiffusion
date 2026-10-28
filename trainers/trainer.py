@@ -8,7 +8,9 @@ import math
 import random
 import json
 import shutil
+import contextlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -21,7 +23,7 @@ from torch.amp import autocast
 from utils.tb_manager import TBManager
 from tqdm import tqdm
 
-from data import get_dataloaders
+from data import get_dataloaders, get_loader
 from models import create_model
 from utils.ema import EMA
 from utils.optim import get_optimizer_and_scheduler
@@ -35,7 +37,9 @@ from utils.callbacks import (
     ExternalPPLCallback,
     MauveCallback,
     VisualizationCallback,
+    TextAudioCallback
 )
+from utils.regimes import sample_conditioning_plan
 
 
 from utils.schedule_controller import EntropyScheduleController
@@ -243,8 +247,10 @@ def _save_config_to_run_dir(cfg, run_dir: Path):
     cfg_dict = _cfg_to_dict(cfg)
 
     cfg_json_path = run_dir / "config.json"
-    with open(cfg_json_path, "w") as f:
+    tmp_path = run_dir / f".config.json.tmp.{os.getpid()}"
+    with open(tmp_path, "w") as f:
         json.dump(cfg_dict, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, cfg_json_path)
 
     config_path = getattr(cfg, "_config_path", None)
     if config_path is not None and os.path.isfile(config_path):
@@ -263,6 +269,9 @@ class _NullWriter:
         pass
 
     def add_image(self, *args, **kwargs):
+        pass
+
+    def add_audio(self, *args, **kwargs):
         pass
 
     def add_figure(self, *args, **kwargs):
@@ -569,6 +578,44 @@ def _dataloader_kwargs(cfg) -> dict:
         kw["persistent_workers"] = True
     return kw
 
+def _make_split_loader(
+    dataset,
+    cfg,
+    *,
+    shuffle: bool,
+    drop_last: bool,
+    ddp_active: bool,
+    world_size: int,
+    rank: int,
+) -> torch.utils.data.DataLoader:
+    dl_kw = _dataloader_kwargs(cfg)
+
+    if ddp_active:
+        batch_size = cfg.train.batch_size // world_size
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            shuffle=False,
+            drop_last=drop_last,
+            **dl_kw,
+        )
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=cfg.train.batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        **dl_kw,
+    )
+
 def _resolve_checkpointing_cfg(cfg) -> dict:
     """
     Backward-compatible checkpointing config resolver.
@@ -662,6 +709,25 @@ def _resolve_checkpointing_cfg(cfg) -> dict:
         "resume_interval_enabled": resume_interval_enabled,
         "resume_interval_every_steps": resume_interval_every_steps,
     }
+
+
+def _load_text_speech_tokenizers(cfg, device):
+    import tiktoken
+    from stable_codec import StableCodec
+    text_tokenizer_name = str(getattr(cfg.data, 'text_tokenizer', 'o200k_base'))
+    speech_tokenizer_name = str(getattr(cfg.data, 'speech_tokenizer', 'stabilityai/stable-codec-speech-16k'))
+    speech_tokenizer_bottleneck = str(getattr(cfg.data, 'speech_tokenizer_bottleneck', '1x46656_400bps'))
+    speech_tokenizer_bottleneck_dims = getattr(cfg.data, 'speech_tokenize_bottleneck_dims', None)
+
+    text_tok = tiktoken.get_encoding(text_tokenizer_name)
+    speech_tok = StableCodec(pretrained_model=speech_tokenizer_name, device=device).eval()
+    if speech_tokenizer_bottleneck_dims is not None:
+        bottleneck_arg = [([speech_tokenizer_bottleneck_dims, 1.0])]
+    else:
+        bottleneck_arg = speech_tokenizer_bottleneck
+    speech_tok.set_posthoc_bottleneck(bottleneck_arg)
+
+    return text_tok, speech_tok
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Trainer
@@ -769,10 +835,22 @@ class Trainer:
                 mode = getattr(logging_cfg, "mode", "online")
                 run_name = cfg.experiment
 
+                # Reuse the same W&B run id across sequential launches of the same
+                # experiment (e.g. chained SLURM jobs) so logs land in one continuous
+                # run instead of a new one each time. If the config sets run_id
+                # explicitly, that always wins.
+                run_id = getattr(logging_cfg, "run_id", None)
+                wandb_id_path = self.run_dir / "wandb_run_id.txt"
+                if not run_id and wandb_id_path.exists():
+                    run_id = wandb_id_path.read_text().strip() or None
+                if not run_id:
+                    run_id = wandb.util.generate_id()
+                    wandb_id_path.write_text(run_id)
+
                 wandb.init(
                     project=project,
                     entity=entity,
-                    id=logging_cfg.run_id,
+                    id=run_id,
                     resume="allow",
                     name=run_name,
                     config=cfg_dict,
@@ -806,61 +884,98 @@ class Trainer:
 
 
         # ── data ────────────────────────────────────────────────────────────
-        raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
-        dl_kw = _dataloader_kwargs(cfg)
+        self.is_protein = bool(getattr(cfg.model, "protein", False))
+        self.protein_mixture_schedule = None
+        self.protein_replay_loader = None
+        self._protein_replay_iter = None
+        self._protein_accum_counter = 0
 
-        if self.ddp_active:
-            assert cfg.train.batch_size % self.world_size == 0, (
-                f"Global batch_size ({cfg.train.batch_size}) must be divisible by world_size "
-                f"({self.world_size}) for fixed-shape DDP training."
-            )
-            batch_size_per_gpu = cfg.train.batch_size // self.world_size
+        if self.is_protein:
+            from data.protein_multimodal import get_multimodal_loader
 
-            train_sampler = DistributedSampler(
-                raw_train_loader.dataset,
-                num_replicas=self.world_size,
-                rank=self.rank,
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be "
+                    f"divisible by world_size ({self.world_size})."
+                )
+                local_batch_size = cfg.train.batch_size // self.world_size
+            else:
+                local_batch_size = int(cfg.train.batch_size)
+
+            protein_seed = int(getattr(cfg.train, "seed", 42))
+            self.train_loader = get_multimodal_loader(
+                cfg,
+                split="train",
+                batch_size=local_batch_size,
                 shuffle=True,
-                drop_last=True,
+                seed=protein_seed,
             )
-            self.train_loader = torch.utils.data.DataLoader(
-                raw_train_loader.dataset,
-                batch_size=batch_size_per_gpu,
-                sampler=train_sampler,
+            self.val_loader = get_multimodal_loader(
+                cfg,
+                split="val",
+                batch_size=local_batch_size,
                 shuffle=False,
-                drop_last=True,
-                **dl_kw,
+                seed=protein_seed,
             )
 
-            val_sampler = DistributedSampler(
-                raw_val_loader.dataset,
-                num_replicas=self.world_size,
-                rank=self.rank,
-                shuffle=False,
-                drop_last=True,
+            replay_root = str(
+                getattr(cfg.data, "sequence_replay_root", "") or ""
             )
-            self.val_loader = torch.utils.data.DataLoader(
-                raw_val_loader.dataset,
-                batch_size=batch_size_per_gpu,
-                sampler=val_sampler,
-                shuffle=False,
-                drop_last=True,
-                **dl_kw,
+            replay_fraction = float(
+                getattr(cfg.data, "sequence_replay_fraction", 0.0) or 0.0
             )
+            if replay_fraction > 0.0:
+                if not replay_root or not (Path(replay_root) / "manifest.json").exists():
+                    raise RuntimeError(
+                        "Protein sequence replay is enabled but no prepared "
+                        f"manifest exists under {replay_root!r}."
+                    )
+                original_shard = cfg.data.shard_dir
+                original_source_weights = getattr(cfg.data, "source_weights", None)
+                original_task_weights = getattr(cfg.data, "task_weights", None)
+                cfg.data.shard_dir = replay_root
+                cfg.data.source_weights = None
+                cfg.data.task_weights = {"sequence_marginal": 1.0}
+                try:
+                    self.protein_replay_loader = get_multimodal_loader(
+                        cfg,
+                        split="train",
+                        batch_size=local_batch_size,
+                        shuffle=True,
+                        seed=protein_seed + 101,
+                    )
+                finally:
+                    cfg.data.shard_dir = original_shard
+                    cfg.data.source_weights = original_source_weights
+                    cfg.data.task_weights = original_task_weights
+
+            if bool(getattr(cfg.data, "use_mixture_schedule", False)):
+                from data.protein_tasks import TaskMixtureSchedule
+
+                self.protein_mixture_schedule = TaskMixtureSchedule()
+                if self.protein_replay_loader is None:
+                    raise RuntimeError(
+                        "The protein mixture schedule includes sequence replay, "
+                        "but no replay loader was constructed."
+                    )
         else:
-            self.train_loader = torch.utils.data.DataLoader(
-                raw_train_loader.dataset,
-                batch_size=cfg.train.batch_size,
-                shuffle=True,
-                drop_last=True,
-                **dl_kw,
+            raw_train_loader, raw_val_loader, _ = get_dataloaders(cfg)
+
+            if self.ddp_active:
+                assert cfg.train.batch_size % self.world_size == 0, (
+                    f"Global batch_size ({cfg.train.batch_size}) must be divisible by world_size "
+                    f"({self.world_size}) for fixed-shape DDP training."
+                )
+
+            self.train_loader = _make_split_loader(
+                raw_train_loader.dataset, cfg,
+                shuffle=True, drop_last=True,
+                ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
             )
-            self.val_loader = torch.utils.data.DataLoader(
-                raw_val_loader.dataset,
-                batch_size=cfg.train.batch_size,
-                shuffle=False,
-                drop_last=True,
-                **dl_kw,
+            self.val_loader = _make_split_loader(
+                raw_val_loader.dataset, cfg,
+                shuffle=False, drop_last=True,
+                ddp_active=self.ddp_active, world_size=self.world_size, rank=self.rank,
             )
 
         # ── model ───────────────────────────────────────────────────────────
@@ -884,7 +999,8 @@ class Trainer:
                 base,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
-                find_unused_parameters=False,
+                find_unused_parameters=self.is_protein,
+                bucket_cap_mb=200, # Increase multi-node capacity
             )
 
         compile_enabled = bool(getattr(self.cfg.train, "use_compile", False))
@@ -904,6 +1020,16 @@ class Trainer:
                 print("[torch.compile] not available in this PyTorch; using eager mode.")
 
         self.model = base
+
+        # Keep model initialization identical across ranks, then give the
+        # protein task/noise stream a distinct seed on each worker.
+        if self.is_protein:
+            stochastic_seed = int(getattr(cfg.train, "seed", 42)) + self.rank
+            random.seed(stochastic_seed)
+            np.random.seed(stochastic_seed % (2**32 - 1))
+            torch.manual_seed(stochastic_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(stochastic_seed)
 
         # ── opt / ema / amp ────────────────────────────────────────────────
         self.ema = EMA(self.model, decay=cfg.train.ema_decay)
@@ -927,6 +1053,11 @@ class Trainer:
         )
         self.scaler = GradScaler(enabled=self.use_scaler)
         self.grad_clip = float(getattr(cfg.optim, "grad_clip", 1.0))
+        self.protein_grad_accum_steps = (
+            max(1, int(getattr(cfg.train, "grad_accum_steps", 1) or 1))
+            if self.is_protein
+            else 1
+        )
 
         # ──────────────────────────────────────────────────────────────────
         # Entropy modes: none vs online(adaptive) vs offline
@@ -1008,6 +1139,12 @@ class Trainer:
         self._entropy_ln_mu = None
         self._entropy_ln_std = None
 
+        dataset = self.cfg.data.dataset
+        if dataset == 'textaudio':
+            text_tok, speech_tok = _load_text_speech_tokenizers(cfg, self.device)
+            self.text_tok = text_tok
+            self.speech_tok = speech_tok
+
         self.callbacks: List[Callback] = []
 
         # ── framework-specific components ───────────────────────────────────
@@ -1028,7 +1165,7 @@ class Trainer:
                 self.callbacks.append(OfflineEntropyProfileCallback(cfg))
 
             # SigmaDataEstimator / plotting are master-only (no collectives, pure logging)
-            if self.is_master:
+            if self.is_master and not self.is_protein:
                 self.callbacks.append(SigmaDataEstimator(num_batches=10))
                 self.callbacks.append(
                     EntropySchedulePlotCallback(
@@ -1073,6 +1210,30 @@ class Trainer:
             if vis_cfg is not None and bool(getattr(vis_cfg, "enabled", False)):
                 self.callbacks.append(VisualizationCallback(cfg))
 
+            # Text+audio generation
+            textaudio_cfg = getattr(cfg.train, 'textaudio', None)
+            if textaudio_cfg is not None and bool(getattr(textaudio_cfg, 'enabled', False)):
+                # Different datasets are required for cross-conditional task evaluation:
+                # Text-to-speech: speaker embedding extracted from a held out sample for each speaker
+                # Continuation: speaker embedding extracted from the 3-second prompt
+                self.val_loader_tts = SimpleNamespace(
+                    dataset=get_loader(cfg, split='val', task='tts').dataset
+                )
+                self.val_loader_cont = SimpleNamespace(
+                    dataset=get_loader(cfg, split='val', task='cont').dataset
+                )
+
+                self.callbacks.append(TextAudioCallback(cfg))
+
+            # MNIST-Sum: exact image->text accuracy + text->image samples.
+            # NOTE: MNISTSumEvalCallback sets run_on_all_ranks = True and that is
+            # load-bearing -- sampling rank-0-only through the compiled DDP module
+            # wedges the NEXT training step (rank 0 recompiles for shapes the other
+            # ranks never see). Do not "optimise" it to rank 0.
+            ms_cfg = getattr(cfg.train, "mnist_sum_eval", None)
+            if ms_cfg is not None and bool(getattr(ms_cfg, "enabled", False)):
+                from utils.callbacks import MNISTSumEvalCallback
+                self.callbacks.append(MNISTSumEvalCallback(cfg))
 
         elif cfg.framework == "discrete_sedd":
             self.proc = DiscreteForwardProcess(cfg)
@@ -1255,7 +1416,7 @@ class Trainer:
                 print(f"⚠️  RNG state restore warning: {e}")
 
     def _load_checkpoint(self, path: Path):
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         state_dict = ckpt["model"]
         clean_state_dict = {}
         for k, v in state_dict.items():
@@ -1316,7 +1477,7 @@ class Trainer:
 
         This is the "fresh run from weights" mode.
         """
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if "model" not in ckpt:
             raise KeyError(f"Checkpoint at {path} missing key 'model'.")
 
@@ -1453,11 +1614,37 @@ class Trainer:
         # ------------------------------------------------------------------
         cond_cfg = getattr(self.cfg, "cond", None)
         cond_enabled_cfg = (cond_cfg is not None) and bool(getattr(cond_cfg, "enabled", False))
+        regime_adapter = (
+            str(getattr(cond_cfg, "regime_adapter", "")).lower()
+            if cond_cfg is not None else ""
+        )
 
+        # protect_mask: positions held at their TRUE values even when CFG drops
+        # the conditioning modality. None for layouts with no such positions.
+        protect_mask = None
+        regime_loss_mask = None
         if not cond_enabled_cfg:
             cond_enabled = False
             prefix_mask = None
             cL_pos = None
+        elif regime_adapter:
+            cL_pos = None
+            bpt = (
+                int(getattr(self.cfg.data, "bits_per_token", 18))
+                if not is_cont_tokens else 1
+            )
+            plan = sample_conditioning_plan(
+                regime_adapter,
+                self.cfg,
+                B,
+                S,
+                device=self.device,
+                bits_per_token=bpt,
+            )
+            prefix_mask = plan.clamp_mask
+            regime_loss_mask = plan.loss_mask
+            protect_mask = plan.protect_mask if bool(plan.protect_mask.any()) else None
+            cond_enabled = bool(prefix_mask.any())
         else:
             cL_pos = _sample_cond_len_positions_per_example_continuous(
                 self.cfg, B, S, device=self.device
@@ -1498,9 +1685,13 @@ class Trainer:
             if drop_mask.any():
                 if is_cont_tokens:
                     replace = drop_mask.view(B, 1, 1) & prefix_mask.unsqueeze(-1)
+                    if protect_mask is not None:
+                        replace = replace & (~protect_mask).unsqueeze(-1)
                     prefix_used_full[replace] = null_full[replace]
                 else:
                     replace = drop_mask.view(B, 1) & prefix_mask
+                    if protect_mask is not None:
+                        replace = replace & (~protect_mask)
                     prefix_used_full[replace] = null_full[replace]
 
             del null_full
@@ -1600,7 +1791,12 @@ class Trainer:
 
             loss_mask = None
             if suffix_only_loss and cond_enabled and (not noise_prefix):
-                loss_mask = (~prefix_mask).to(dtype=torch.float32)
+                target_mask = (
+                    regime_loss_mask
+                    if regime_loss_mask is not None
+                    else ~prefix_mask
+                )
+                loss_mask = target_mask.to(dtype=torch.float32)
 
             loss_target = x0_target if is_cont_tokens else x0_clean
 
@@ -1639,20 +1835,34 @@ class Trainer:
             self.opt.zero_grad(set_to_none=True)
 
             if self.use_scaler:
+                # GradScaler already skips opt.step() internally (and adjusts its
+                # scale factor) if the unscaled gradients contain inf/nan -- this
+                # branch only runs for amp_dtype==float16, which is why it has its
+                # own built-in protection already.
                 self.scaler.scale(loss).backward()
                 if self.grad_clip > 0:
                     self.scaler.unscale_(self.opt)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.scaler.step(self.opt)
                 self.scaler.update()
+                self.lr_sched.step()
+                self.ema.update(self.model)
             else:
                 loss.backward()
+                skip_step = False
                 if self.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                self.opt.step()
-
-            self.lr_sched.step()
-            self.ema.update(self.model)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    if not torch.isfinite(grad_norm):
+                        skip_step = True
+                        if self.is_master:
+                            print(
+                                f"[warn] step {self.global_step}: non-finite grad_norm="
+                                f"{grad_norm.item()}, skipping optimizer step"
+                            )
+                if not skip_step:
+                    self.opt.step()
+                    self.lr_sched.step()
+                    self.ema.update(self.model)
 
         # ------------------------------------------------------------------
         # Entropy buffer update
@@ -1772,7 +1982,7 @@ class Trainer:
         else:
             return metric > self.best_metric
 
-    def _build_ckpt_state(self, epoch: int) -> dict:
+    def _build_ckpt_state(self, epoch: int, epoch_complete: bool = True) -> dict:
         raw_model = _unwrap_all(self.model)
 
         # --- NEW: make EMA checkpoint portable (save shadows on CPU) ---
@@ -1796,6 +2006,7 @@ class Trainer:
             "rng_state": self._rng_state(),
             "best_metric": self.best_metric,
             "best_ckpts": self.best_ckpts,
+            "epoch_complete": epoch_complete,
         }
 
     def _save_ckpt(self, epoch: int, val_metric: float):
@@ -1855,7 +2066,7 @@ class Trainer:
         if int(self.global_step) < int(self._next_resume_ckpt_step):
             return
 
-        state = self._build_ckpt_state(epoch)
+        state = self._build_ckpt_state(epoch, epoch_complete=False)
 
         if self.save_last:
             tmp_path = self._checkpoint_path("last.tmp")
@@ -1885,7 +2096,7 @@ class Trainer:
             return
 
         # Build checkpoint state (same as others)
-        state = self._build_ckpt_state(epoch)
+        state = self._build_ckpt_state(epoch, epoch_complete=False)
 
         # Save
         name = f"step={int(self.global_step):09d}"
@@ -1894,6 +2105,8 @@ class Trainer:
 
         # Track interval ckpts for optional pruning (only interval ckpts)
         self._interval_ckpt_paths.append(path.name)
+
+        self._maybe_save_entropy_snapshot()
 
         keep_last = self.ckpt_interval_keep_last  # None => keep all
         if keep_last is not None and keep_last > 0:
@@ -1908,11 +2121,261 @@ class Trainer:
         while int(self._next_interval_ckpt_step) <= int(self.global_step):
             self._next_interval_ckpt_step += int(self.ckpt_interval_every_steps)
 
+    def _maybe_save_entropy_snapshot(self) -> None:
+        """
+        Save entropy snapshot at specific steps to allow for offline generation
+        with the entropic sampler. 
+        """
+        if self.cfg.framework != "continuous_score":
+            return
+        if not getattr(self, "_entropy_ready", False):
+            return
+
+        snap_dir = self.run_dir / "entropy_snapshots" / f"step_{int(self.global_step):09d}"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+
+        torch.save(self._entropy_pdf.detach().cpu(), snap_dir / "entropy_pdf.pt")
+        torch.save(self._entropy_cdf.detach().cpu(), snap_dir / "entropy_cdf.pt")
+        torch.save(self._entropy_sigmas.detach().cpu(), snap_dir / "entropy_sigmas.pt")
+        if self._entropy_edges is not None:
+            torch.save(self._entropy_edges.detach().cpu(), snap_dir / "entropy_edges.pt")
 
     # ──────────────────────────────────────────────────────────────────────
     # Training Loop
     # ──────────────────────────────────────────────────────────────────────
+    # Protein-only training path. The ordinary continuous/discrete paths below
+    # deliberately do not know about dict batches, task mixtures, or gradient
+    # accumulation.
+    def _protein_progress(self) -> float:
+        total = int(getattr(self.cfg.optim, "total_steps", 0) or 0)
+        return 0.0 if total <= 0 else min(1.0, max(0.0, self.global_step / total))
+
+    def _protein_replay_fraction(self) -> float:
+        if self.protein_mixture_schedule is not None:
+            from data.protein_tasks import REPLAY_CORPUS
+
+            return self.protein_mixture_schedule.corpus_fraction(
+                self._protein_progress(), REPLAY_CORPUS
+            )
+        return float(getattr(self.cfg.data, "sequence_replay_fraction", 0.0) or 0.0)
+
+    def _protein_refresh_mixture(self) -> None:
+        if self.protein_mixture_schedule is None:
+            return
+        from data.protein_tasks import PAIRED_CORPUS, REPLAY_CORPUS
+
+        progress = self._protein_progress()
+        for loader, corpus in (
+            (self.train_loader, PAIRED_CORPUS),
+            (self.protein_replay_loader, REPLAY_CORPUS),
+        ):
+            if loader is None:
+                continue
+            weights = self.protein_mixture_schedule.task_weights_for_corpus(
+                progress, corpus
+            )
+            collate = getattr(loader, "collate_fn", None)
+            if weights and collate is not None and hasattr(collate, "task_weights"):
+                collate.task_weights = dict(weights)
+
+    def _protein_should_replay(self) -> bool:
+        if self.protein_replay_loader is None:
+            return False
+        fraction = self._protein_replay_fraction()
+        if fraction <= 0.0:
+            return False
+        seed = int(getattr(self.cfg.train, "seed", 42))
+        draw = np.random.default_rng(
+            (seed, 777, int(self.global_step), int(self._protein_accum_counter))
+        ).random()
+        return bool(draw < fraction)
+
+    def _protein_next_replay_batch(self):
+        if self._protein_replay_iter is None:
+            self._protein_replay_iter = iter(self.protein_replay_loader)
+        try:
+            return next(self._protein_replay_iter)
+        except StopIteration:
+            self._protein_replay_iter = iter(self.protein_replay_loader)
+            return next(self._protein_replay_iter)
+
+    @staticmethod
+    def _protein_set_loader_epoch(loader, epoch: int) -> None:
+        if loader is None:
+            return
+        for obj in (
+            getattr(loader, "dataset", None),
+            getattr(loader, "sampler", None),
+            getattr(loader, "batch_sampler", None),
+            getattr(loader, "collate_fn", None),
+        ):
+            if obj is not None and hasattr(obj, "set_epoch"):
+                obj.set_epoch(epoch)
+
+    def _step_protein(self, batch, is_train: bool):
+        """One protein micro-step, based on Bruno's multimodal step."""
+        from trainers.multimodal_step import multimodal_training_step
+
+        accum = self.protein_grad_accum_steps
+        boundary = (not is_train) or self._protein_accum_counter + 1 >= accum
+        suppress_sync = (
+            is_train
+            and not boundary
+            and self.ddp_active
+            and hasattr(self.model, "no_sync")
+        )
+        sync_ctx = self.model.no_sync() if suppress_sync else contextlib.nullcontext()
+        with autocast(
+            self.device.type, enabled=self.amp_enabled, dtype=self.amp_dtype
+        ):
+            loss, components = multimodal_training_step(
+                self.model,
+                batch,
+                self.proc,
+                self.cfg,
+                device=self.device,
+                is_train=is_train,
+            )
+
+        if is_train:
+            if self._protein_accum_counter == 0:
+                self.opt.zero_grad(set_to_none=True)
+            with sync_ctx:
+                scaled_loss = loss / accum
+                if self.use_scaler:
+                    self.scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+            if boundary:
+                if self.use_scaler:
+                    if self.grad_clip > 0:
+                        self.scaler.unscale_(self.opt)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.scaler.step(self.opt)
+                    self.scaler.update()
+                else:
+                    if self.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.opt.step()
+                self.lr_sched.step()
+                self.ema.update(self.model)
+                self._protein_accum_counter = 0
+            else:
+                self._protein_accum_counter += 1
+
+        self._last_protein_components = {
+            key: float(value) for key, value in components.items()
+        }
+        return loss.item(), boundary
+
+    @torch.compiler.disable
+    @torch.no_grad()
+    def _validate_protein(self):
+        self.model.eval()
+        self.ema.apply(self.model)
+        local_loss = torch.tensor(0.0, device=self.device)
+        local_count = torch.tensor(0.0, device=self.device)
+        try:
+            pbar = tqdm(
+                self.val_loader,
+                desc="Validating proteins",
+                leave=False,
+                disable=not self.is_master,
+            )
+            for batch in pbar:
+                loss, _ = self._step_protein(batch, is_train=False)
+                local_loss += loss
+                local_count += 1
+            if self.ddp_active:
+                dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
+                dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+            return (local_loss / local_count.clamp_min(1.0)).item()
+        finally:
+            self.ema.restore(self.model)
+
+    def _train_protein(self):
+        """Targeted protein loop; all non-protein configs use train() unchanged."""
+        target_total_steps = int(getattr(self.cfg.optim, "total_steps", 0) or 0)
+        stop_training = False
+        try:
+            for epoch in range(self.start_epoch, self.cfg.train.epochs):
+                self._protein_refresh_mixture()
+                self._protein_set_loader_epoch(self.train_loader, epoch)
+                self._protein_set_loader_epoch(self.val_loader, epoch)
+                self._protein_set_loader_epoch(self.protein_replay_loader, epoch)
+                self._protein_replay_iter = None
+                self.model.train()
+                train_loss = 0.0
+                microbatches = 0
+                pbar = tqdm(
+                    self.train_loader,
+                    desc=f"Epoch {epoch + 1}/{self.cfg.train.epochs}",
+                    leave=True,
+                    disable=not self.is_master,
+                )
+                for paired_batch in pbar:
+                    if target_total_steps > 0 and self.global_step >= target_total_steps:
+                        stop_training = True
+                        break
+                    if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                        torch.compiler.cudagraph_mark_step_begin()
+                    batch = (
+                        self._protein_next_replay_batch()
+                        if self._protein_should_replay()
+                        else paired_batch
+                    )
+                    loss, did_step = self._step_protein(batch, is_train=True)
+                    train_loss += loss
+                    microbatches += 1
+                    if not did_step:
+                        continue
+
+                    self.global_step += 1
+                    self._protein_refresh_mixture()
+                    self._maybe_save_resume_ckpt(epoch)
+                    self._maybe_save_interval_ckpt(epoch)
+                    if self.is_master:
+                        pbar.set_postfix(loss=f"{loss:.4f}")
+                        if (
+                            self.tb_scalar_every_steps > 0
+                            and self.global_step % self.tb_scalar_every_steps == 0
+                        ):
+                            self.writer.add_scalar("loss/iter_train", loss, self.global_step)
+                            self.writer.add_scalar(
+                                "learning_rate", self.opt.param_groups[0]["lr"], self.global_step
+                            )
+                    if target_total_steps > 0 and self.global_step >= target_total_steps:
+                        stop_training = True
+                        break
+
+                if microbatches == 0:
+                    break
+                avg_train_loss = train_loss / microbatches
+                avg_val_loss = self._validate_protein()
+                if self.is_master:
+                    self.writer.add_scalar("loss/epoch_train", avg_train_loss, self.global_step)
+                    self.writer.add_scalar("loss/epoch_val", avg_val_loss, self.global_step)
+                    print(
+                        f"Epoch {epoch + 1}: Train Loss = {avg_train_loss:.4f}, "
+                        f"Val Loss = {avg_val_loss:.4f}"
+                    )
+                    self._save_ckpt(epoch, avg_val_loss)
+                    if self.tb is not None:
+                        self.tb.flush()
+                if self.ddp_active:
+                    dist.barrier()
+                if stop_training:
+                    break
+        finally:
+            if self.is_master and self.tb is not None:
+                self.tb.close()
+            if self.use_wandb and wandb is not None and self.is_master:
+                wandb.finish()
+
     def train(self):
+        if self.is_protein:
+            return self._train_protein()
+
         step_fn = self._step_continuous if self.cfg.framework == "continuous_score" else self._step_discrete
 
         # IMPORTANT: callbacks may include run_on_all_ranks=True (e.g. offline entropy)
@@ -2029,11 +2492,11 @@ class Trainer:
                         }
                     )
 
-                # Run callbacks (some may request running on all ranks)
-                self._run_callbacks("on_epoch_end", epoch)
-
                 if self.is_master:
                     self._save_ckpt(epoch, avg_val_loss)
+
+                # Run callbacks (some may request running on all ranks)
+                self._run_callbacks("on_epoch_end", epoch)
 
                 # Flush TB buffers and sync staged logs -> run_dir (master only)
                 if self.is_master and self.tb is not None:

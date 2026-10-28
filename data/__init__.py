@@ -5,8 +5,10 @@ from typing import Tuple, Literal
 from torch.utils.data import DataLoader
 from ml_collections import config_dict
 
-from .openwebtext import OpenWebTextDataset
-from .lm1b import LM1BDataset
+from .text.openwebtext import OpenWebTextDataset
+from .text.lm1b import LM1BDataset
+from .text_audio.text_audio import TextAudioDataset, TextAudioTTSDataset, TextAudioContinuationDataset
+from .mnist_sum.mnist_sum_bits import MNISTSumBitsDataset, get_dataloaders as _mnist_sum_get_dataloaders
 
 Split = Literal["train", "val", "test"]
 
@@ -22,6 +24,7 @@ def get_loader(
     batch_size: int | None = None,
     shuffle: bool | None = None,
     drop_last: bool | None = None,
+    task: str | None = None,
     seed: int = 42,
 ) -> DataLoader:
     """
@@ -65,8 +68,54 @@ def get_loader(
         ds = LM1BDataset(config, split=split)
         return _make_direct_loader(ds)
 
+    # ---------------- Text+Audio ----------------
+    if name in {'textaudio', 'libri'}:
+        if task in {'tts', 'tts_gt', 'tts_vc'}:
+            if task in {'tts_gt', 'tts_vc'}:
+                cache_path = getattr(config.data, f'{task}_cache_path', None)
+                meta_path = getattr(config.data, f'{task}_meta_path', None)
+                if not cache_path or not meta_path:
+                    raise ValueError(
+                        f"task={task!r} requires cfg.data.{task}_cache_path and "
+                        f"cfg.data.{task}_meta_path."
+                    )
+                ds = TextAudioTTSDataset(
+                    config,
+                    split=split,
+                    cache_path=cache_path,
+                    meta_path=meta_path,
+                    log_tag=task,
+                )
+            else:
+                ds = TextAudioTTSDataset(config, split=split)
+        elif task in {'cont', 'cont_taste'}:
+            ds = TextAudioContinuationDataset(config, split=split)
+        elif task == 'cont_flowslm':
+            ds = TextAudioContinuationDataset(config, split=split, cache_name='flow_slm_cont_cache')
+        else:
+            ds = TextAudioDataset(config, split=split)
+        return _make_direct_loader(ds)
+
+    # ---------------- MNIST-Sum (image+text bitstream) ----------------
+    if name in {"MNISTSumBits", "mnist_sum_bits"}:
+        ds = MNISTSumBitsDataset(config, split=split)
+        return _make_direct_loader(ds)
+
+    # ---------------- Protein sequence+structure bitstream ----------------
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+
+        return get_multimodal_loader(
+            config,
+            split=split,
+            batch_size=batch,
+            shuffle=shuffle,
+            seed=seed,
+        )
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
+        "'Textaudio', 'MNISTSumBits', 'ProteinMultimodalLFQ'."
     )
 
 
@@ -82,13 +131,36 @@ def get_dataloaders(
     name = _norm_dataset_name(getattr(config.data, "dataset", None))
 
     if name in {"OpenWebText", "openwebtext", "owt", "OpenWebTextFLM", "openwebtext_flm"}:
-        from .openwebtext import get_dataloaders as _owt_get_dataloaders
+        from .text.openwebtext import get_dataloaders as _owt_get_dataloaders
         return _owt_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
     if name in {"LM1B", "lm1b", "OneBillionWords", "one_billion_words"}:
-        from .lm1b import get_dataloaders as _lm1b_get_dataloaders
+        from .text.lm1b import get_dataloaders as _lm1b_get_dataloaders
         return _lm1b_get_dataloaders(config, batch_size=batch_size, seed=seed)
 
+    if name in {'textaudio', 'libri'}:
+        from .text_audio.text_audio import get_dataloaders as _textaudio_get_dataloaders
+        return _textaudio_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
+    if name in {"MNISTSumBits", "mnist_sum_bits"}:
+        return _mnist_sum_get_dataloaders(config, batch_size=batch_size, seed=seed)
+
+    if name in {"ProteinMultimodalLFQ", "protein_multimodal", "dplm_paired"}:
+        from .protein_multimodal import get_multimodal_loader
+
+        batch = int(batch_size or config.train.batch_size)
+        train = get_multimodal_loader(
+            config, split="train", batch_size=batch, shuffle=True, seed=seed
+        )
+        val = get_multimodal_loader(
+            config, split="val", batch_size=batch, shuffle=False, seed=seed
+        )
+        test = get_multimodal_loader(
+            config, split="test", batch_size=batch, shuffle=False, seed=seed
+        )
+        return train, val, test
+
     raise NotImplementedError(
-        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B'."
+        f"Unknown dataset '{name}'. Supported: 'OpenWebText', 'LM1B', "
+        "'Textaudio', 'MNISTSumBits', 'ProteinMultimodalLFQ'."
     )

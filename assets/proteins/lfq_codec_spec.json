@@ -1,0 +1,24 @@
+{
+  "purpose": "Frozen, committed reference of the protein bitstream codec conventions. Small and reproducibility-critical; transient metric outputs and result bundles live in .trentinium/, not here.",
+  "structure_codec": {
+    "codec": "dplm2_lfq",
+    "num_dims": 13,
+    "codebook_size": 8192,
+    "bit_order": "msb_first",
+    "positive_bit_is_plus_one": true,
+    "patch_layout": "[seq_0..seq_4 | lfq_0..lfq_12]",
+    "seq_bits_per_residue": 5,
+    "struct_bits_per_residue": 13
+  },
+  "structure_convention_note": "msb_first: latent dim 0 is the MSB of the released DPLM decimal index (LFQ.forward / get_codebook_entry descending mask 2**arange(12,-1,-1)). Verified 2026-07-18 against bytedance/dplm sources.",
+  "structure_convention_hash": "71220cdbbb22b4ff",
+  "structure_codebook_size": 8192,
+  "sequence_codec": {
+    "name": "raw_binary",
+    "hash": "4d1acb33463a10b7",
+    "alphabet": "ACDEFGHIKLMNPQRSTVWY",
+    "bits_per_residue": 5
+  },
+  "patch_layout": "[seq_0..seq_4 | lfq_0..lfq_12]  (18 bits per residue)",
+  "last_verified": "2026-07-18"
+}
