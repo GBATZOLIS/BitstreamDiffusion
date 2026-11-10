@@ -1618,7 +1618,25 @@ class DDIMSampler:
         progress: bool = True,
         x_init: Optional[torch.Tensor] = None,
         sigma_start: Optional[float] = None,
+        score_temp: float = 1.0,
+        score_temp_final: str = "unsharpened",
     ):
+        """score_temp: global score temperature tau (Yang et al. 2026, "Sigma",
+            arXiv:2610.02665; same as the rolling-cobit / TinyGSM "global" mode).
+            The drift uses D_tau = x + (D - x)/tau, i.e. the score divided by tau,
+            at EVERY step (constant in sigma), applied after the CFG mix.
+            Self-conditioning and the readout use the untempered prediction.
+            tau = 1 is bit-identical to the base sampler.
+        score_temp_final: 'unsharpened' (default) keeps the last integration step
+            untempered: a tempered final step has gain g/tau and overshoots once
+            g/tau > 1, flipping bits that are already decided. 'sharpened' tempers
+            every step.
+        """
+        score_temp = float(score_temp)
+        if not math.isfinite(score_temp) or score_temp <= 0:
+            raise ValueError(f"score_temp must be finite and > 0, got {score_temp}")
+        if score_temp_final not in ("unsharpened", "sharpened"):
+            raise ValueError("score_temp_final must be 'unsharpened' or 'sharpened'")
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
 
@@ -1703,9 +1721,11 @@ class DDIMSampler:
         if progress:
             indices = tqdm(indices, desc="DDIM Sampler", leave=False)
 
+        last_interval = len(sigmas) - 2
         for i in indices:
             sigma_cur, sigma_next = sigmas[i], sigmas[i + 1]
             sigma_prev = sigmas[i - 1] if i > 0 else None
+            tau_i = 1.0 if (score_temp_final == "unsharpened" and i == last_interval) else score_temp
 
             if cond_enabled:
                 _clamp_mask_(x, prefix_full, prefix_mask)
@@ -1774,9 +1794,10 @@ class DDIMSampler:
 
                 probs_g = probs_u + guidance_scale * (probs_c - probs_u)
                 _clamp_mask_(probs_g, prefix_full, prefix_mask)
+                drift_probs = probs_g if tau_i == 1.0 else x_state + (probs_g - x_state) / tau_i
 
                 score_cur = _score_from_probs(
-                    probs_g,
+                    drift_probs,
                     x_state,
                     sigma_state,
                     is_cont_tokens=self.is_cont_tokens,
@@ -1843,9 +1864,10 @@ class DDIMSampler:
                 if cond_enabled:
                     _clamp_mask_(x0_hat_cur, prefix_full, prefix_mask)
                     _clamp_mask_(probs, prefix_full, prefix_mask)
+                drift_probs = probs if tau_i == 1.0 else x_state + (probs - x_state) / tau_i
 
                 score_cur = _score_from_probs(
-                    probs,
+                    drift_probs,
                     x_state,
                     sigma_state,
                     is_cont_tokens=self.is_cont_tokens,

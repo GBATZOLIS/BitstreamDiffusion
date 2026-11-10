@@ -185,6 +185,10 @@ def get_config():
     cfg.evaluation.schedule = "entropic"
     cfg.evaluation.num_sampling_steps = 50
     cfg.evaluation.guidance_scale = 5.0
+    # Global score temperature (1.0 = unchanged sampler); see
+    # configs/proteins/proteins_400m_score_temp.py for the sweep config.
+    cfg.evaluation.score_temp = 1.0
+    cfg.evaluation.score_temp_final = "unsharpened"
     cfg.evaluation.entropic_blend_alpha = 0.0
     cfg.evaluation.sigma_min = 0.002
     cfg.evaluation.sigma_max = 80.0

@@ -6,6 +6,7 @@ fixed.
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -474,6 +475,8 @@ def generate(
     struct_sigma_scale: float | None = None,
     num_steps: int | None = None,
     seed: int | None = None,
+    score_temp: float | None = None,
+    score_temp_final: str | None = None,
 ) -> dict[str, object]:
     """Sample num_samples proteins of length residues under task."""
     L = int(length)
@@ -529,6 +532,30 @@ def generate(
     )
     selected_steps = int(getattr(ev, "num_sampling_steps", 400))
     num_steps = int(_resolve_setting("num_steps", num_steps, selected_steps))
+    # Global score temperature (DDIMSampler.score_temp): drift uses
+    # x + (D_cfg - x) / tau at every step; tau = 1 is the unchanged sampler.
+    selected_score_temp = getattr(ev, "score_temp", None)
+    score_temp = float(
+        _resolve_setting(
+            "score_temp",
+            score_temp,
+            1.0 if selected_score_temp is None else selected_score_temp,
+        )
+    )
+    if not math.isfinite(score_temp) or score_temp <= 0:
+        raise ValueError(f"score_temp must be finite and > 0, got {score_temp}")
+    selected_final = getattr(ev, "score_temp_final", None)
+    score_temp_final = str(
+        _resolve_setting(
+            "score_temp_final",
+            score_temp_final,
+            "unsharpened" if selected_final is None else selected_final,
+        )
+    )
+    if score_temp != 1.0 and solver != "ddim_entropic":
+        raise ValueError(
+            "score_temp != 1 is implemented for the DDIM (ddim_entropic) solver only"
+        )
     ckpt = getattr(ev, "checkpoint_path", None)
     locked_entropy_dir = (
         Path(str(ckpt)).expanduser().resolve().parent.parent if ckpt else None
@@ -691,6 +718,11 @@ def generate(
                 return_probs=True,
                 x_init=x_init,
                 sigma_start=sigma_start,
+                **(
+                    dict(score_temp=score_temp, score_temp_final=score_temp_final)
+                    if solver == "ddim_entropic"
+                    else {}
+                ),
                 **cond_kwargs,
             )
     finally:
@@ -708,6 +740,8 @@ def generate(
         "effective_guidance_scale": effective_guidance_scale,
         "cfg_active": cfg_active,
         "num_sampling_steps": num_steps,
+        "score_temp": score_temp,
+        "score_temp_final": score_temp_final,
         "seed": None if seed is None else int(seed),
         "sigma_min": sigma_min,
         "sigma_max": sigma_max,
